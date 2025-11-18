@@ -1,0 +1,184 @@
+
+{% extends 'explorer/base.html' %}
+
+{% block title %}Cascate Cloud - {{ current_path|default:"Главная" }}{% endblock %}
+
+{% block content %}
+<!-- Статистика -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card stats-card">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <h4 class="card-title mb-1 text-dark">
+                            <i class="bi bi-folder2-open me-2"></i>
+                            {% if current_path %}
+                                {{ current_path }}
+                            {% else %}
+                                {{ root_folder }}
+                            {% endif %}
+                        </h4>
+                        <p class="card-text mb-0 text-dark">
+                            <i class="bi bi-file-earmark me-1"></i>
+                            Всего файлов в хранилище: <strong>{{ total_files_count }}</strong>
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-md-end">
+                        <div class="btn-group">
+                            <a href="{% url 'index' %}" class="btn btn-outline-light">
+                                <i class="bi bi-house me-1"></i>Главная
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Хлебные крошки -->
+{% if breadcrumbs %}
+<nav class="mb-4">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item">
+            <a href="{% url 'index' %}">
+                <i class="bi bi-house me-1"></i>Главная
+            </a>
+        </li>
+        {% for crumb in breadcrumbs %}
+            <li class="breadcrumb-item">
+                <a href="{% url 'folder' path=crumb.path %}">{{ crumb.name }}</a>
+            </li>
+        {% endfor %}
+    </ol>
+</nav>
+{% endif %}
+
+<!-- Папки -->
+{% if folders %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h5 class="mb-3 text-dark">
+            <i class="bi bi-folder-fill me-2"></i>
+            Папки <span class="badge bg-secondary">{{ folders|length }}</span>
+        </h5>
+        <div class="row g-3">
+            {% for folder in folders %}
+            <div class="col-xl-3 col-lg-4 col-md-6">
+                <a href="{% url 'folder' path=folder.path %}" class="text-decoration-none">
+                    <div class="card folder-card h-100">
+                        <div class="card-body">
+                            <div class="d-flex align-items-start">
+                                <i class="bi bi-folder-fill file-icon"></i>
+                                <div class="flex-grow-1" style="min-width: 0;">
+                                    <h6 class="card-title mb-1 folder-title">
+                                        {{ folder.name }}
+                                    </h6>
+                                    <small class="file-size">
+                                        <i class="bi bi-calendar me-1"></i>
+                                        {{ folder.modified }}
+                                    </small>
+                                </div>
+                                <i class="bi bi-chevron-right text-muted mt-1"></i>
+                            </div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Файлы -->
+{% if files %}
+<div class="row">
+    <div class="col-12">
+        <h5 class="mb-3 text-dark">
+            <i class="bi bi-file-earmark-fill me-2"></i>
+            Файлы <span class="badge bg-secondary">{{ files|length }}</span>
+        </h5>
+        <div class="row g-3">
+            {% for file in files %}
+            <div class="col-12">
+                <div class="card file-card">
+                    <div class="card-body">
+                        <div class="row align-items-center">
+                            <div class="col-md-6">
+                                <div class="d-flex align-items-center">
+                                    <i class="bi
+                                        {% if file.file_type == 'image' %}bi-file-image
+                                        {% elif file.file_type == 'video' %}bi-file-play
+                                        {% elif file.file_type == 'audio' %}bi-file-music
+                                        {% elif file.file_type == 'pdf' %}bi-file-pdf
+                                        {% elif file.file_type == 'word' %}bi-file-word
+                                        {% elif file.file_type == 'excel' %}bi-file-excel
+                                        {% elif file.file_type == 'powerpoint' %}bi-file-ppt
+                                        {% elif file.file_type == 'archive' %}bi-file-zip
+                                        {% elif file.file_type == 'text' %}bi-file-text
+                                        {% elif file.file_type == 'code' %}bi-file-code
+                                        {% else %}bi-file-earmark{% endif %}
+                                        file-icon">
+                                    </i>
+                                    <div style="min-width: 0; flex: 1;">
+                                        <h6 class="mb-1 text-multiline">
+                                            {{ file.name }}
+                                        </h6>
+                                        <div class="file-size">
+                                            <span class="me-3">
+                                                <i class="bi bi-hdd me-1"></i>
+                                                {{ file.size|filesizeformat }}
+                                            </span>
+                                            <span>
+                                                <i class="bi bi-calendar me-1"></i>
+                                                {{ file.modified }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6 text-md-end">
+                                <div class="btn-group">
+                                    {% if file.public_link %}
+                                    <a href="{{ file.public_link }}"
+                                       target="_blank"
+                                       class="btn btn-outline-primary action-btn"
+                                       title="Открыть в Яндекс.Диске">
+                                        <i class="bi bi-folder2-open me-1"></i>Открыть в Яндекс.Диске
+                                    </a>
+                                    {% endif %}
+                                    {% if file.download_link %}
+                                    <a href="{{ file.download_link }}"
+                                       class="btn btn-outline-success action-btn"
+                                       title="Скачать файл">
+                                        <i class="bi bi-download me-1"></i>Скачать
+                                    </a>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Пустая папка -->
+{% if not folders and not files %}
+<div class="row">
+    <div class="col-12 text-center py-5">
+        <i class="bi bi-folder-x display-1 text-muted mb-3"></i>
+        <h3 class="text-muted">Папка пуста</h3>
+        <p class="text-muted">Здесь пока нет файлов или папок</p>
+        <a href="{% url 'index' %}" class="btn btn-primary mt-3">
+            <i class="bi bi-arrow-left me-2"></i>Назад к главной
+        </a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

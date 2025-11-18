@@ -1,0 +1,290 @@
+
+{% extends 'explorer/base.html' %}
+
+{% block title %}Содержание - Cascate Cloud{% endblock %}
+
+{% block content %}
+<!-- Заголовок страницы -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card stats-card">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <h4 class="card-title mb-1 text-dark">
+                            <i class="bi bi-list-ul me-2"></i>Содержание документации
+                        </h4>
+                        <p class="card-text mb-0 text-dark">
+                            Полный каталог технической документации фабрики Cascate
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-md-end">
+                        <a href="{% url 'index' %}" class="btn btn-outline-light">
+                            <i class="bi bi-arrow-left me-1"></i>Назад
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Содержание с раскрывающимися списками -->
+<div class="row">
+    <div class="col-12">
+        <div class="accordion" id="contentAccordion">
+            {% for section in content_structure %}
+            <div class="accordion-item mb-3">
+                <h2 class="accordion-header" id="heading{{ section.id }}">
+                    <button class="accordion-button collapsed" type="button"
+                            data-bs-toggle="collapse"
+                            data-bs-target="#collapse{{ section.id }}"
+                            aria-expanded="false"
+                            aria-controls="collapse{{ section.id }}">
+                        <span class="section-title text-dark">{{ section.id }}. {{ section.title }}</span>
+                        {% if section.link %}
+                        <a href="{{ section.link }}" target="_blank" class="ms-auto me-3 btn btn-outline-light section-action-btn" onclick="event.stopPropagation();">
+                            <i class="bi bi-folder2-open me-1"></i>Открыть в Яндекс.Диске
+                        </a>
+                        {% endif %}
+                    </button>
+                </h2>
+                <div id="collapse{{ section.id }}"
+                     class="accordion-collapse collapse"
+                     aria-labelledby="heading{{ section.id }}"
+                     data-bs-parent="#contentAccordion">
+                    <div class="accordion-body">
+                        <ul class="content-list">
+                            {% for item in section.items %}
+                            <li class="content-item">
+                                {% if item.subitems %}
+                                <!-- Подпункт с вложенными элементами -->
+                                <div class="subitem-header">
+                                    <i class="bi bi-folder2 me-2"></i>
+                                    <strong>{{ item.title }}</strong>
+                                </div>
+                                <ul class="content-sublist">
+                                    {% for subitem in item.subitems %}
+                                    <li class="content-subitem">
+                                        <span class="text-dark">{{ subitem.title }}</span>
+                                        {% if subitem.link %}
+                                        <a href="{{ subitem.link }}" target="_blank" class="file-link">
+                                            <i class="bi bi-box-arrow-up-right"></i>
+                                        </a>
+                                        {% endif %}
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                {% else %}
+                                <!-- Обычный пункт -->
+                                <span class="text-dark">{{ item.title }}</span>
+                                {% if item.link %}
+                                <a href="{{ item.link }}" target="_blank" class="file-link">
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </a>
+                                {% endif %}
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<style>
+    /* Стили для аккордеона */
+    .accordion-item {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 10px var(--shadow-color);
+    }
+
+    .accordion-item:hover {
+        border-color: var(--primary-color);
+        box-shadow: 0 4px 15px rgba(26, 26, 26, 0.15);
+    }
+
+    .accordion-button {
+        background: var(--bg-card);
+        color: var(--text-dark);
+        border: none;
+        padding: 1.25rem 1.5rem;
+        font-size: 1.1rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+    }
+
+    .accordion-button:not(.collapsed) {
+        background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+        color: white;
+        box-shadow: none;
+    }
+
+    .accordion-button:not(.collapsed) .section-title {
+        color: white !important;
+    }
+
+    .accordion-button:focus {
+        box-shadow: none;
+        border-color: transparent;
+    }
+
+    .accordion-button::after {
+        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%231a1a1a'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3e%3c/svg%3e");
+        filter: none;
+        transition: all 0.3s ease;
+    }
+
+    .accordion-button:not(.collapsed)::after {
+        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23ffffff'%3e%3cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3e%3c/svg%3e");
+    }
+
+    .section-title {
+        flex: 1;
+        text-align: left;
+        margin: 0;
+    }
+
+    .section-action-btn {
+        border-radius: 8px;
+        padding: 6px 12px;
+        font-size: 0.875rem;
+        transition: all 0.2s ease;
+        color: var(--text-dark);
+        border-color: var(--border-color);
+        background: white;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        white-space: nowrap;
+    }
+
+    .section-action-btn:hover {
+        background-color: var(--primary-color);
+        border-color: var(--primary-color);
+        color: white;
+        transform: scale(1.05);
+    }
+
+    .accordion-button:not(.collapsed) .section-action-btn {
+        border-color: white;
+        color: white;
+        background: transparent;
+    }
+
+    .accordion-button:not(.collapsed) .section-action-btn:hover {
+        background: white;
+        color: var(--primary-color);
+    }
+
+    .accordion-body {
+        background: rgba(255, 255, 255, 0.7);
+        padding: 1.5rem;
+    }
+
+    /* Списки */
+    .content-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    .content-item {
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.5rem;
+        background: var(--bg-card);
+        border-radius: 8px;
+        border-left: 3px solid var(--primary-color);
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--text-dark);
+    }
+
+    .content-item:hover {
+        background: rgba(26, 26, 26, 0.05);
+        transform: translateX(5px);
+    }
+
+    /* Подпункты */
+    .subitem-header {
+        color: var(--primary-color);
+        margin-bottom: 0.75rem;
+        font-size: 1.05rem;
+        display: flex;
+        align-items: center;
+    }
+
+    .content-sublist {
+        list-style: none;
+        padding-left: 0;
+        margin: 0.5rem 0 0 0;
+    }
+
+    .content-subitem {
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.25rem;
+        background: rgba(26, 26, 26, 0.05);
+        border-radius: 6px;
+        border-left: 2px solid rgba(26, 26, 26, 0.3);
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.95rem;
+        color: var(--text-dark);
+    }
+
+    .content-subitem:hover {
+        background: rgba(26, 26, 26, 0.1);
+        transform: translateX(3px);
+    }
+
+    /* Ссылки на файлы */
+    .file-link {
+        color: var(--primary-color);
+        text-decoration: none;
+        margin-left: 0.5rem;
+        transition: all 0.2s ease;
+    }
+
+    .file-link:hover {
+        color: var(--primary-hover);
+        transform: scale(1.2);
+    }
+
+    /* Иконки */
+    .bi-folder2 {
+        color: #6c757d;
+    }
+
+    /* Убираем иконки файлов у пунктов */
+    .content-item .bi-file-earmark-text,
+    .content-subitem .bi-file-earmark-text {
+        display: none;
+    }
+</style>
+
+<script>
+    // Плавная прокрутка к открытому разделу
+    document.querySelectorAll('.accordion-button').forEach(button => {
+        button.addEventListener('click', function() {
+            setTimeout(() => {
+                if (!this.classList.contains('collapsed')) {
+                    this.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }, 350);
+        });
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,158 @@
+
+{% extends 'explorer/base.html' %}
+
+{% block title %}Поиск: {{ query }}{% endblock %}
+
+{% block content %}
+<!-- Заголовок поиска -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card stats-card">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <h4 class="card-title mb-1 text-dark">
+                            <i class="bi bi-search me-2"></i>Результаты поиска
+                        </h4>
+                        <p class="card-text mb-0 text-dark">
+                            {% if query %}
+                                По запросу "<strong class="text-primary">{{ query }}</strong>" найдено:
+                                <strong>{{ results_count }} файл(ов)</strong>
+                                {% if search_time %}
+                                <small class="text-muted">(за {{ search_time }} сек)</small>
+                                {% endif %}
+                            {% else %}
+                                Введите поисковый запрос
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-md-end">
+                        <a href="{% url 'index' %}" class="btn btn-outline-light">
+                            <i class="bi bi-arrow-left me-1"></i>Назад
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Форма поиска -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card file-card">
+            <div class="card-body">
+                <form action="{% url 'search' %}" method="get" class="row g-2 align-items-center">
+                    <div class="col-md-8">
+                        <input type="text" name="q" class="form-control search-box"
+                               value="{{ query }}" placeholder="Введите название файла для поиска..."
+                               autocomplete="off">
+                    </div>
+                    <div class="col-md-4">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-search me-1"></i>Быстрый поиск
+                        </button>
+                    </div>
+                </form>
+                {% if search_time and search_time < 1 %}
+                <div class="mt-2 text-center">
+                    <small class="text-success">
+                        <i class="bi bi-lightning-charge"></i>
+                        Мгновенный поиск!
+                    </small>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Результаты поиска -->
+{% if query %}
+    {% if results %}
+    <div class="row">
+        <div class="col-12">
+            <h5 class="mb-3 text-dark">
+                <i class="bi bi-list-ul me-2"></i>
+                Найденные файлы
+            </h5>
+            <div class="row g-3">
+                {% for file in results %}
+                <div class="col-12">
+                    <div class="card file-card">
+                        <div class="card-body">
+                            <div class="row align-items-center">
+                                <div class="col-md-6">
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi
+                                            {% if file.file_type == 'image' %}bi-file-image
+                                            {% elif file.file_type == 'video' %}bi-file-play
+                                            {% elif file.file_type == 'audio' %}bi-file-music
+                                            {% elif file.file_type == 'pdf' %}bi-file-pdf
+                                            {% elif file.file_type == 'word' %}bi-file-word
+                                            {% elif file.file_type == 'excel' %}bi-file-excel
+                                            {% elif file.file_type == 'archive' %}bi-file-zip
+                                            {% elif file.file_type == 'text' %}bi-file-text
+                                            {% elif file.file_type == 'code' %}bi-file-code
+                                            {% else %}bi-file-earmark{% endif %}
+                                            file-icon">
+                                        </i>
+                                        <div style="min-width: 0; flex: 1;">
+                                            <h6 class="mb-1 text-multiline">
+                                                {{ file.name }}
+                                            </h6>
+                                            <div class="file-size">
+                                                <span class="me-3">
+                                                    <i class="bi bi-hdd me-1"></i>
+                                                    {{ file.size|filesizeformat }}
+                                                </span>
+                                                <span class="me-3">
+                                                    <i class="bi bi-folder me-1"></i>
+                                                    {{ file.path }}
+                                                </span>
+                                                <span>
+                                                    <i class="bi bi-calendar me-1"></i>
+                                                    {{ file.modified|slice:":10" }}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6 text-md-end">
+                                    <div class="btn-group">
+                                        {% if file.public_link %}
+                                        <a href="{{ file.public_link }}"
+                                           target="_blank"
+                                           class="btn btn-outline-primary action-btn"
+                                           title="Открыть в Яндекс.Диске">
+                                            <i class="bi bi-folder2-open me-1"></i>Открыть
+                                        </a>
+                                        {% endif %}
+                                        {% if file.download_link %}
+                                        <a href="{{ file.download_link }}"
+                                           class="btn btn-outline-success action-btn"
+                                           title="Скачать файл">
+                                            <i class="bi bi-download me-1"></i>Скачать
+                                        </a>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="row">
+        <div class="col-12 text-center py-5">
+            <i class="bi bi-search display-1 text-muted mb-3"></i>
+            <h3 class="text-muted">Ничего не найдено</h3>
+            <p class="text-muted">Попробуйте изменить поисковый запрос</p>
+        </div>
+    </div>
+    {% endif %}
+{% endif %}
+{% endblock %}

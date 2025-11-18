@@ -1,0 +1,98 @@
+
+<div class="folder-item {% if level > 0 %}collapsed{% endif %} level-{{ level }}">
+    {% if item.type == 'folder' %}
+    <!-- Папка -->
+    <div class="d-flex align-items-center p-2 rounded hover-item">
+        {% if item.children %}
+        <div class="folder-toggle" onclick="toggleFolder(this)">
+            <i class="toggle-icon bi {% if level > 0 %}bi-plus-circle{% else %}bi-dash-circle{% endif %} text-primary"></i>
+        </div>
+        {% else %}
+        <div style="width: 24px; margin-right: 8px;"></div>
+        {% endif %}
+
+        <a href="{{ item.public_link }}" target="_blank" class="folder-name flex-grow-1 text-dark text-decoration-none d-flex align-items-center">
+            <i class="bi bi-folder-fill text-secondary me-2"></i>
+            <strong>{{ item.name }}</strong>
+            <small class="text-muted ms-2">(папка)</small>
+        </a>
+    </div>
+
+    {% if item.children %}
+    <div class="folder-content">
+        {% for child in item.children %}
+            {% include 'explorer/partials/folder_item.html' with item=child level=level|add:1 %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% else %}
+    <!-- Файл -->
+    <div class="d-flex align-items-center p-2 rounded hover-item">
+        <div style="width: 24px; margin-right: 8px;"></div>
+        <a href="{{ item.public_link }}" target="_blank" class="file-name flex-grow-1 text-dark text-decoration-none d-flex align-items-center">
+            <i class="bi
+                {% if '.pdf' in item.name %}bi-file-pdf text-danger
+                {% elif '.doc' in item.name or '.docx' in item.name %}bi-file-word text-primary
+                {% elif '.xls' in item.name or '.xlsx' in item.name %}bi-file-excel text-success
+                {% elif '.zip' in item.name or '.rar' in item.name %}bi-file-zip text-warning
+                {% elif '.jpg' in item.name or '.png' in item.name or '.gif' in item.name %}bi-file-image text-success
+                {% else %}bi-file-earmark text-secondary{% endif %} me-2">
+            </i>
+            {{ item.name }}
+            <small class="text-muted ms-2">(файл)</small>
+        </a>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+    .folder-item {
+        margin: 2px 0;
+        transition: all 0.2s ease;
+    }
+
+    .hover-item:hover {
+        background: linear-gradient(135deg, rgba(26, 26, 26, 0.05) 0%, rgba(45, 45, 45, 0.05) 100%);
+        border-radius: 6px;
+    }
+
+    .folder-toggle {
+        cursor: pointer;
+        margin-right: 8px;
+        transition: all 0.2s ease;
+    }
+
+    .folder-toggle:hover {
+        transform: scale(1.1);
+    }
+
+    .folder-content {
+        margin-left: 24px;
+        border-left: 2px solid var(--border-color);
+        padding-left: 12px;
+    }
+
+    .level-1 { margin-left: 20px; }
+    .level-2 { margin-left: 40px; }
+    .level-3 { margin-left: 60px; }
+    .level-4 { margin-left: 80px; }
+</style>
+
+<script>
+    function toggleFolder(element) {
+        const folderItem = element.closest('.folder-item');
+        const folderContent = folderItem.querySelector('.folder-content');
+        const toggleIcon = element.querySelector('.toggle-icon');
+
+        if (folderContent.style.display === 'none') {
+            folderContent.style.display = 'block';
+            toggleIcon.classList.remove('bi-plus-circle');
+            toggleIcon.classList.add('bi-dash-circle');
+        } else {
+            folderContent.style.display = 'none';
+            toggleIcon.classList.remove('bi-dash-circle');
+            toggleIcon.classList.add('bi-plus-circle');
+        }
+    }
+</script>
