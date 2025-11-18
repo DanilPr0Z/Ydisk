@@ -1,26 +1,44 @@
+
 import requests
-import json
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
+from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums import ParseMode
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class SearchStates(StatesGroup):
+    waiting_for_search = State()
 
 
 class SearchBot:
     def __init__(self):
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.api_url = os.getenv('SITE_API_URL', 'http://localhost:8000/api/search/')
-        self.application = Application.builder().token(self.token).build()
+
+        if not self.token:
+            raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+
+        self.bot = Bot(token=self.token)
+        self.storage = MemoryStorage()
+        self.dp = Dispatcher(storage=self.storage)
+        self.router = Router()
+        self.dp.include_router(self.router)
 
         # Регистрируем обработчики
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("search", self.search_command))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        self.router.message.register(self.start, Command("start"))
+        self.router.message.register(self.search_command, Command("search"))
+        self.router.message.register(self.handle_message, F.text)
+        self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
 
-    async def start(self, update: Update, context: CallbackContext):
+    async def start(self, message: types.Message):
         """Обработчик команды /start"""
         welcome_text = """
 🔍 *Бот для поиска файлов в Cascate Cloud*
@@ -34,41 +52,51 @@ class SearchBot:
 `Распашные двери ALTA`
 `инструкция установки`
         """
-        await update.message.reply_text(welcome_text, parse_mode='Markdown')
+        await message.answer(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
-    async def search_command(self, update: Update, context: CallbackContext):
+    async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
-        if not context.args:
-            await update.message.reply_text("❌ Укажите поисковый запрос после команды\nПример: `/search инструкция`",
-                                            parse_mode='Markdown')
+        query = message.text.replace('/search', '').strip()
+
+        if not query:
+            await message.answer("❌ Укажите поисковый запрос после команды\nПример: `/search инструкция`",
+                                 parse_mode=ParseMode.MARKDOWN)
             return
 
-        query = ' '.join(context.args)
-        await self.perform_search(update, query)
+        await self.perform_search(message, query, state)
 
-    async def handle_message(self, update: Update, context: CallbackContext):
+    async def handle_message(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений (быстрый поиск)"""
-        query = update.message.text
-        await self.perform_search(update, query)
+        query = message.text.strip()
 
-    async def perform_search(self, update: Update, query: str):
+        # Игнорируем команды, которые уже обрабатываются отдельно
+        if query.startswith('/'):
+            return
+
+        await self.perform_search(message, query, state)
+
+    async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API"""
         try:
             # Показываем что бот работает
-            await update.message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode='Markdown')
+            await message.answer(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
 
             # Вызываем API
             response = requests.get(f"{self.api_url}?q={query}", timeout=30)
 
             if response.status_code != 200:
-                await update.message.reply_text("❌ Ошибка при поиске. Попробуйте позже.")
+                await message.answer("❌ Ошибка при поиске. Попробуйте позже.")
                 return
 
             data = response.json()
 
             if data['results_count'] == 0:
-                await update.message.reply_text(f"❌ По запросу '*{query}*' ничего не найдено", parse_mode='Markdown')
+                await message.answer(f"❌ По запросу '*{query}*' ничего не найдено",
+                                     parse_mode=ParseMode.MARKDOWN)
                 return
+
+            # Сохраняем результаты в состояние
+            await state.update_data(last_results=data['results'])
 
             # Отправляем результаты
             results_text = f"✅ Найдено *{data['results_count']}* файлов по запросу '*{query}*':\n\n"
@@ -80,41 +108,35 @@ class SearchBot:
                 results_text += f"📅 Изменен: {result['modified'][:10]}\n\n"
 
             # Создаем кнопки для результатов
-            keyboard = []
+            builder = InlineKeyboardBuilder()
             for i, result in enumerate(data['results'][:5]):  # Максимум 5 кнопок
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📎 {result['name'][:30]}...",
-                        callback_data=f"file_{i}"
-                    )
-                ])
+                builder.add(InlineKeyboardButton(
+                    text=f"📎 {result['name'][:30]}...",
+                    callback_data=f"file_{i}"
+                ))
+            builder.adjust(1)  # По одной кнопке в строке
 
-            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-
-            await update.message.reply_text(
+            await message.answer(
                 results_text,
-                parse_mode='Markdown',
-                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=builder.as_markup(),
                 disable_web_page_preview=True
             )
 
-            # Сохраняем результаты в контексте для callback
-
-
         except requests.exceptions.Timeout:
-            await update.message.reply_text("⏰ Таймаут при поиске. Попробуйте позже.")
+            await message.answer("⏰ Таймаут при поиске. Попробуйте позже.")
         except Exception as e:
-            await update.message.reply_text("❌ Произошла ошибка при поиске.")
+            await message.answer("❌ Произошла ошибка при поиске.")
             print(f"Bot error: {e}")
 
-    async def button_callback(self, update: Update, context: CallbackContext):
+    async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки"""
-        query = update.callback_query
-        await query.answer()
+        try:
+            file_index = int(callback_query.data.split('_')[1])
 
-        if query.data.startswith('file_'):
-            file_index = int(query.data.split('_')[1])
-            results = context.user_data.get('last_results', [])
+            # Получаем сохраненные результаты
+            user_data = await state.get_data()
+            results = user_data.get('last_results', [])
 
             if file_index < len(results):
                 file_info = results[file_index]
@@ -129,26 +151,34 @@ class SearchBot:
                 """
 
                 # Создаем кнопки для действий с файлом
-                keyboard = []
-                if file_info['public_link']:
-                    keyboard.append([
-                        InlineKeyboardButton("🌐 Открыть в Яндекс.Диске", url=file_info['public_link'])
-                    ])
-                if file_info['download_link']:
-                    keyboard.append([
-                        InlineKeyboardButton("📥 Скачать файл", url=file_info['download_link'])
-                    ])
+                builder = InlineKeyboardBuilder()
+                if file_info.get('public_link'):
+                    builder.add(InlineKeyboardButton(
+                        text="🌐 Открыть в Яндекс.Диске",
+                        url=file_info['public_link']
+                    ))
+                if file_info.get('download_link'):
+                    builder.add(InlineKeyboardButton(
+                        text="📥 Скачать файл",
+                        url=file_info['download_link']
+                    ))
+                builder.adjust(1)  # По одной кнопке в строке
 
-                reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-
-                await query.edit_message_text(
+                await callback_query.message.edit_text(
                     file_text,
-                    parse_mode='Markdown',
-                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=builder.as_markup(),
                     disable_web_page_preview=True
                 )
 
-    def run(self):
+            await callback_query.answer()
+
+        except Exception as e:
+            await callback_query.answer("❌ Ошибка при получении информации о файле")
+            print(f"Callback error: {e}")
+
+    async def run(self):
         """Запускает бота"""
         print("🤖 Бот запущен...")
-        self.application.run_polling()
+        await self.dp.start_polling(self.bot)
+
