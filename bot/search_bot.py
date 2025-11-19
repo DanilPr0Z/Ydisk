@@ -109,7 +109,7 @@ class SearchBot:
 
             # Создаем кнопки для результатов
             builder = InlineKeyboardBuilder()
-            for i, result in enumerate(data['results'][:5]):  # Максимум 5 кнопок
+            for i, result in enumerate(data['results'][:100]):  # Максимум 5 кнопок
                 builder.add(InlineKeyboardButton(
                     text=f"📎 {result['name'][:30]}...",
                     callback_data=f"file_{i}"
