@@ -1,4 +1,3 @@
-
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -35,14 +34,15 @@ def api_search(request):
     if not query_words:
         db_results = FileIndex.objects.filter(
             search_vector__icontains=query_lower
-        )[:100]  # Ограничиваем результаты
+        )
     else:
         search_conditions = Q()
         for word in query_words:
             search_conditions |= Q(search_vector__icontains=word)
 
-        db_results = FileIndex.objects.filter(search_conditions)[:100]
+        db_results = FileIndex.objects.filter(search_conditions)
 
+    # ВОЗВРАЩАЕМ ВСЕ РЕЗУЛЬТАТЫ БЕЗ ОГРАНИЧЕНИЙ
     results = []
     yandex_client = YandexDiskClient()
 
@@ -101,7 +101,6 @@ def api_search(request):
         'results_count': len(results),
         'results': results
     })
-
 
 @csrf_exempt
 @require_http_methods(["GET"])

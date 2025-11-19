@@ -47,7 +47,7 @@ class SearchBot:
     async def get_session(self):
         """Создает aiohttp сессию при необходимости"""
         if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=120)  # 60 секунд таймаут
+            timeout = aiohttp.ClientTimeout(total=60)
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
@@ -88,11 +88,143 @@ class SearchBot:
         """Обработчик обычных сообщений (быстрый поиск)"""
         query = message.text.strip()
 
-        # Игнорируем команды, которые уже обрабатываются отдельно
         if query.startswith('/'):
             return
 
         await self.perform_search(message, query, state)
+
+    def split_message(self, text, max_length=4000):
+        """Разбивает длинное сообщение на части"""
+        if len(text) <= max_length:
+            return [text]
+
+        parts = []
+        while text:
+            if len(text) <= max_length:
+                parts.append(text)
+                break
+
+            # Ищем место для разбивки (последний перенос строки перед лимитом)
+            split_pos = text.rfind('\n', 0, max_length)
+            if split_pos == -1:
+                # Если нет переносов, разбиваем по границе слова
+                split_pos = text.rfind(' ', 0, max_length)
+            if split_pos == -1:
+                # Если нет пробелов, просто обрезаем
+                split_pos = max_length
+
+            parts.append(text[:split_pos])
+            text = text[split_pos:].lstrip()
+
+        return parts
+
+    async def send_results_in_parts(self, chat_id, all_results, query, state):
+        """Отправляет все результаты частями с кнопками"""
+        total_files = len(all_results)
+
+        # Сохраняем ВСЕ результаты в состояние
+        await state.update_data(last_results=all_results)
+
+        # Создаем кнопки для ВСЕХ результатов
+        builder = InlineKeyboardBuilder()
+
+        for i, result in enumerate(all_results):
+            display_name = result['name']
+
+            # Обрезаем длинные названия, но оставляем читаемыми
+            if len(display_name) > 35:
+                if '.' in display_name:
+                    name_part, ext = display_name.rsplit('.', 1)
+                    display_name = name_part[:32] + '...' + '.' + ext
+                else:
+                    display_name = display_name[:35] + '...'
+
+            button_text = f"{i + 1}. {display_name}"
+
+            builder.row(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"file_{i}"
+            ))
+
+        # Разбиваем результаты на батчи по 10 файлов для лучшей читаемости
+        batch_size = 10
+        total_batches = (total_files + batch_size - 1) // batch_size
+
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min((batch_num + 1) * batch_size, total_files)
+            batch_results = all_results[start_idx:end_idx]
+
+            # Формируем текст для батча
+            if batch_num == 0:
+                # Первое сообщение с заголовком
+                batch_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
+            else:
+                # Последующие сообщения
+                batch_text = f"📄 Файлы {start_idx + 1}-{end_idx} из {total_files}:\n\n"
+
+            # Добавляем файлы батча
+            for i, result in enumerate(batch_results, start=start_idx + 1):
+                name = html.escape(result['name'])
+                path = html.escape(result['path'])
+                size = html.escape(result['size_formatted'])
+                modified = html.escape(result['modified'][:10])
+
+                batch_text += f"<b>{i}. {name}</b>\n"
+                batch_text += f"📁 <i>Путь:</i> {path}\n"
+                batch_text += f"📦 <i>Размер:</i> {size}\n"
+                batch_text += f"📅 <i>Изменен:</i> {modified}\n\n"
+
+            # Определяем, нужно ли добавлять кнопки
+            is_last_batch = (batch_num == total_batches - 1)
+
+            if is_last_batch:
+                # В последнем сообщении все кнопки
+                current_markup = builder.as_markup()
+            else:
+                # В промежуточных сообщениях НЕТ кнопок
+                current_markup = None
+
+            # Отправляем батч
+            await self.send_long_message(
+                chat_id=chat_id,
+                text=batch_text,
+                reply_markup=current_markup,
+                disable_web_page_preview=True
+            )
+
+            # Небольшая пауза между сообщениями чтобы не спамить
+            if not is_last_batch:
+                await asyncio.sleep(0.3)
+
+    async def send_long_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=True):
+        """Отправляет длинное сообщение частями"""
+        parts = self.split_message(text)
+
+        for i, part in enumerate(parts):
+            is_last_part = (i == len(parts) - 1)
+            current_markup = reply_markup if is_last_part else None  # Клавиатура только в последней части
+
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=current_markup,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+            except Exception as e:
+                print(f"Error sending message part {i}: {e}")
+                # Пытаемся отправить без разметки если есть ошибка
+                try:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=part[:4000],
+                        reply_markup=current_markup,
+                        disable_web_page_preview=disable_web_page_preview
+                    )
+                except Exception as e2:
+                    print(f"Error sending plain text part: {e2}")
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
@@ -101,7 +233,6 @@ class SearchBot:
             search_message = await message.answer(f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                                                   parse_mode=ParseMode.HTML)
 
-            # Используем aiohttp для асинхронного запроса
             session = await self.get_session()
 
             try:
@@ -125,53 +256,15 @@ class SearchBot:
                                                parse_mode=ParseMode.HTML)
                 return
 
-            # Сохраняем ВСЕ результаты в состояние
-            await state.update_data(last_results=data['results'])
+            # Удаляем сообщение "Ищу..."
+            await search_message.delete()
 
-            # Формируем текст результатов с HTML разметкой
-            results_text = f"✅ Найдено <b>{data['results_count']}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
-
-            # Показываем ВСЕ файлы в списке
-            for i, result in enumerate(data['results']):
-                name = html.escape(result['name'])
-                path = html.escape(result['path'])
-                size = html.escape(result['size_formatted'])
-                modified = html.escape(result['modified'][:10])
-
-                results_text += f"<b>{i + 1}. {name}</b>\n"
-                results_text += f"📁 <i>Путь:</i> {path}\n"
-                results_text += f"📦 <i>Размер:</i> {size}\n"
-                results_text += f"📅 <i>Изменен:</i> {modified}\n\n"
-
-            # Создаем кнопки для ВСЕХ результатов - ОДНА КНОПКА В СТРОКУ
-            builder = InlineKeyboardBuilder()
-
-            for i, result in enumerate(data['results']):
-                display_name = result['name']
-
-                # Обрезаем длинные названия, но оставляем читаемыми
-                if len(display_name) > 35:
-                    # Сохраняем расширение файла
-                    if '.' in display_name:
-                        name_part, ext = display_name.rsplit('.', 1)
-                        display_name = name_part[:32] + '...' + '.' + ext
-                    else:
-                        display_name = display_name[:35] + '...'
-
-                # Создаем кнопку с номером и названием файла - КАЖДАЯ КНОПКА В ОТДЕЛЬНОЙ СТРОКЕ
-                button_text = f"{i + 1}. {display_name}"
-
-                builder.row(InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"file_{i}"
-                ))
-
-            # Редактируем исходное сообщение с результатами
-            await search_message.edit_text(
-                results_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=builder.as_markup(),
-                disable_web_page_preview=True
+            # Отправляем ВСЕ результаты частями
+            await self.send_results_in_parts(
+                chat_id=message.chat.id,
+                all_results=data['results'],
+                query=query,
+                state=state
             )
 
         except Exception as e:
@@ -197,11 +290,7 @@ class SearchBot:
 
                 file_text = f"""
 📄 <b>{name}</b>
-
 📁 <b>Путь:</b> {path}
-📦 <b>Размер:</b> {size}
-📅 <b>Изменен:</b> {modified}
-🔗 <b>Тип:</b> {media_type}
                 """
 
                 builder = InlineKeyboardBuilder()
