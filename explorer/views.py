@@ -6,6 +6,7 @@ from .models import FileIndex
 from .utils.yandex_disk import YandexDiskClient
 import time
 import re
+import difflib
 
 
 class FileView:
@@ -32,6 +33,163 @@ class FileView:
             return 'text'
         else:
             return 'file'
+
+
+class SmartSearch:
+    """Класс для умного поиска как в Google"""
+
+    @staticmethod
+    def normalize_text(text):
+        """Нормализует текст для поиска"""
+        if not text:
+            return ""
+
+        # Приводим к нижнему регистру и убираем лишние пробелы
+        text = str(text).lower().strip()
+
+        # Убираем пунктуацию кроме дефисов и точек в расширениях
+        text = re.sub(r'[^\w\s\-\.]', ' ', text)
+
+        # Заменяем множественные пробелы на один
+        text = re.sub(r'\s+', ' ', text)
+
+        return text
+
+    @staticmethod
+    def get_word_variations(word):
+        """Генерирует варианты слова для поиска"""
+        if len(word) <= 3:
+            return [word]
+
+        variations = set()
+        variations.add(word)
+
+        # Базовые формы для русского языка
+        if word.endswith('ь'):
+            variations.add(word[:-1])  # дверь -> двер
+        if word.endswith('и'):
+            variations.add(word[:-1] + 'а')  # двери -> дверь
+            variations.add(word[:-1] + 'ь')  # двери -> дверь
+        if word.endswith('ой'):
+            variations.add(word[:-2] + 'ая')  # дверной -> дверная
+        if word.endswith('ая'):
+            variations.add(word[:-2] + 'ой')  # дверная -> дверной
+        if word.endswith('ый'):
+            variations.add(word[:-2] + 'ая')  # дверный -> дверная
+        if word.endswith('ом'):
+            variations.add(word[:-2])  # двером -> дверь
+        if word.endswith('ам'):
+            variations.add(word[:-2])  # дверям -> дверь
+
+        # Добавляем основу
+        base = word
+        if len(word) > 4:
+            if word.endswith(('ой', 'ая', 'ое', 'ые', 'ий', 'ый')):
+                base = word[:-2]
+            elif word.endswith(('ь', 'и', 'ы', 'а', 'я', 'о', 'е', 'у', 'ю')):
+                base = word[:-1]
+
+            if base and len(base) > 3:
+                variations.add(base)
+
+        return list(variations)
+
+    @staticmethod
+    def calculate_similarity(word1, word2):
+        """Вычисляет схожесть между двумя словами"""
+        if not word1 or not word2:
+            return 0
+
+        # Полное совпадение
+        if word1 == word2:
+            return 1.0
+
+        # Получаем варианты слов
+        variations1 = SmartSearch.get_word_variations(word1)
+        variations2 = SmartSearch.get_word_variations(word2)
+
+        # Проверяем совпадение вариантов
+        for var1 in variations1:
+            for var2 in variations2:
+                if var1 == var2:
+                    return 0.95
+
+        # Проверяем вхождение одной основы в другую
+        for var1 in variations1:
+            for var2 in variations2:
+                if var1 in var2 or var2 in var1:
+                    if len(var1) >= 3 and len(var2) >= 3:
+                        return 0.8
+
+        # Используем SequenceMatcher для похожих слов
+        similarity = difflib.SequenceMatcher(None, word1, word2).ratio()
+
+        if similarity > 0.7:
+            return similarity
+
+        return 0
+
+    @staticmethod
+    def smart_search(query, file_name):
+        """Умный поиск как в Google"""
+        if not query or not file_name:
+            return 0
+
+        # Нормализуем текст
+        query_norm = SmartSearch.normalize_text(query)
+        file_name_norm = SmartSearch.normalize_text(file_name)
+
+        # Если запрос полностью содержится в названии - максимальный рейтинг
+        if query_norm in file_name_norm:
+            return 100
+
+        # Разбиваем на слова
+        query_words = [w for w in query_norm.split() if len(w) > 2]
+        file_words = [w for w in file_name_norm.split() if len(w) > 2]
+
+        if not query_words:
+            return 0
+
+        total_score = 0
+        matched_words = 0
+
+        for q_word in query_words:
+            word_found = False
+            word_score = 0
+
+            for f_word in file_words:
+                similarity = SmartSearch.calculate_similarity(q_word, f_word)
+
+                if similarity > 0.9:
+                    word_score = max(word_score, 1.0)
+                    word_found = True
+                    break  # Нашли идеальное совпадение
+                elif similarity > 0.8:
+                    word_score = max(word_score, 0.8)
+                    word_found = True
+                elif similarity > 0.7:
+                    word_score = max(word_score, 0.6)
+                    word_found = True
+                elif similarity > 0.6:
+                    word_score = max(word_score, 0.4)
+                    word_found = True
+
+            if word_found:
+                total_score += word_score
+                matched_words += 1
+
+        # Если не нашли ни одного похожего слова - возвращаем 0
+        if matched_words == 0:
+            return 0
+
+        # Вычисляем общий рейтинг релевантности
+        base_score = (total_score / len(query_words)) * 80
+
+        # Бонус за совпадение всех слов запроса
+        if matched_words == len(query_words):
+            base_score += 20
+
+        return min(100, base_score)
 
 
 def index(request, path=''):
@@ -118,8 +276,8 @@ def index(request, path=''):
 
 
 def search(request):
-    """СУПЕРБЫСТРЫЙ поиск через базу данных"""
-    query = request.GET.get('q', '').strip().lower()
+    """УМНЫЙ поиск как в Google"""
+    query = request.GET.get('q', '').strip()
 
     if not query:
         context = {
@@ -132,57 +290,25 @@ def search(request):
 
     start_time = time.time()
 
-    # РАЗБИВАЕМ ЗАПРОС НА СЛОВА
-    query_words = [word for word in query.split() if len(word) > 2]
-    first_word = query_words[0] if query_words else query
+    # Получаем ВСЕ файлы из базы
+    all_files_db = FileIndex.objects.all()
 
-    # БЫСТРЫЙ ПОИСК В БАЗЕ ДАННЫХ
-    if not query_words:
-        # Поиск по полной фразе
-        db_results = FileIndex.objects.filter(
-            search_vector__icontains=query
-        )
-    else:
-        # Поиск по словам - создаем условия для каждого слова
-        search_conditions = Q()
-        for word in query_words:
-            search_conditions |= Q(search_vector__icontains=word)
+    print(f"🔍 SMART SEARCH: '{query}' в {all_files_db.count()} файлах...")
 
-        db_results = FileIndex.objects.filter(search_conditions)
+    # Применяем умный поиск ко всем файлам
+    scored_results = []
 
-    # ПРЕОБРАЗУЕМ РЕЗУЛЬТАТЫ И ДОБАВЛЯЕМ РЕЛЕВАНТНОСТЬ
-    results = []
-    for file_item in db_results:
-        file_name_lower = file_item.name.lower()
+    for file_item in all_files_db:
+        # Вычисляем релевантность с помощью умного поиска
+        relevance = SmartSearch.smart_search(query, file_item.name)
 
-        # ВЫЧИСЛЯЕМ РЕЛЕВАНТНОСТЬ
-        match_score = 0
-        matched_words = []
-        has_first_word = False
-
-        if not query_words:
-            if query in file_name_lower:
-                match_score = 100
-                matched_words = [query]
-                has_first_word = True
-        else:
-            for i, word in enumerate(query_words):
-                if word in file_name_lower:
-                    match_score += 1
-                    matched_words.append(word)
-                    if i == 0:
-                        has_first_word = True
-
-        if match_score > 0:
-            relevance_percent = int((match_score / len(query_words)) * 100) if query_words else 100
-
-            # Получаем отображаемый путь
+        if relevance > 5:  # НИЗКИЙ порог чтобы найти больше файлов
             yandex_client = YandexDiskClient()
             relative_path = yandex_client.get_relative_path(file_item.path)
             path_parts = relative_path.split('/')
             display_path = ' / '.join(path_parts[:-1]) if len(path_parts) > 1 else 'Корневая папка'
 
-            results.append({
+            scored_results.append({
                 'name': file_item.name,
                 'path': display_path,
                 'full_path': file_item.path,
@@ -192,34 +318,24 @@ def search(request):
                 'public_link': file_item.public_link,
                 'media_type': file_item.media_type,
                 'file_type': file_item.file_type,
-                'relevance': relevance_percent,
-                'matched_words': matched_words,
-                'has_first_word': has_first_word,
-                'match_score': match_score
+                'relevance': relevance
             })
 
-    # СОРТИРОВКА С ПРИОРИТЕТОМ
-    results.sort(key=lambda x: (
-        not x['has_first_word'],
-        -x['match_score'],
-        -x['relevance'],
-        x['name'].lower()
-    ))
+    # Сортируем по релевантности (убывание)
+    scored_results.sort(key=lambda x: x['relevance'], reverse=True)
+
+    # Ограничиваем количество результатов для производительности
+    final_results = scored_results[:100]
 
     search_time = round(time.time() - start_time, 2)
 
-    # Статистика
-    if results:
-        with_first_word = sum(1 for r in results if r['has_first_word'])
-        print(f"🚀 SUPER FAST DB Search: {len(results)} results for '{query}' "
-              f"in {search_time}s (с первым словом: {with_first_word})")
-    else:
-        print(f"❌ No results found for: '{query}'")
+    print(f"🚀 SMART SEARCH: Найдено {len(final_results)} файлов за {search_time}s "
+          f"(макс. релевантность: {max(r['relevance'] for r in final_results) if final_results else 0}%)")
 
     context = {
         'query': query,
-        'results': results,
-        'results_count': len(results),
+        'results': final_results,
+        'results_count': len(final_results),
         'view': FileView(),
         'search_time': search_time
     }
@@ -227,6 +343,8 @@ def search(request):
     return render(request, 'explorer/search_results.html', context)
 
 
+
+# Остальные функции остаются без изменений
 def content(request):
     """Страница содержания с интерактивными списками"""
     yandex_client = YandexDiskClient()

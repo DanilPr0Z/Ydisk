@@ -119,83 +119,52 @@ class SearchBot:
         return parts
 
     async def send_results_in_parts(self, chat_id, all_results, query, state):
-        """Отправляет все результаты частями с кнопками"""
+        """Отправляет каждый файл отдельным сообщением с кнопкой"""
         total_files = len(all_results)
 
         # Сохраняем ВСЕ результаты в состояние
         await state.update_data(last_results=all_results)
 
-        # Создаем кнопки для ВСЕХ результатов
-        builder = InlineKeyboardBuilder()
+        # Сначала отправляем заголовок с количеством найденных файлов
+        header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text=header_text,
+            parse_mode=ParseMode.HTML
+        )
 
+        # Отправляем каждый файл отдельным сообщением с кнопкой
         for i, result in enumerate(all_results):
-            display_name = result['name']
+            # Формируем текст для файла
+            name = html.escape(result['name'])
+            path = html.escape(result['path'])
+            size = html.escape(result['size_formatted'])
+            modified = html.escape(result['modified'][:10])
 
-            # Обрезаем длинные названия, но оставляем читаемыми
-            if len(display_name) > 35:
-                if '.' in display_name:
-                    name_part, ext = display_name.rsplit('.', 1)
-                    display_name = name_part[:32] + '...' + '.' + ext
-                else:
-                    display_name = display_name[:35] + '...'
+            file_text = f"""
+📄 <b>{name}</b>
 
-            button_text = f"{i + 1}. {display_name}"
+📁 <i>Путь:</i> {path}
+            """
 
+            # Создаем кнопку для этого файла
+            builder = InlineKeyboardBuilder()
             builder.row(InlineKeyboardButton(
-                text=button_text,
+                text="📋 Получить ссылки на файл",
                 callback_data=f"file_{i}"
             ))
 
-        # Разбиваем результаты на батчи по 10 файлов для лучшей читаемости
-        batch_size = 10
-        total_batches = (total_files + batch_size - 1) // batch_size
-
-        for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min((batch_num + 1) * batch_size, total_files)
-            batch_results = all_results[start_idx:end_idx]
-
-            # Формируем текст для батча
-            if batch_num == 0:
-                # Первое сообщение с заголовком
-                batch_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
-            else:
-                # Последующие сообщения
-                batch_text = f"📄 Файлы {start_idx + 1}-{end_idx} из {total_files}:\n\n"
-
-            # Добавляем файлы батча
-            for i, result in enumerate(batch_results, start=start_idx + 1):
-                name = html.escape(result['name'])
-                path = html.escape(result['path'])
-                size = html.escape(result['size_formatted'])
-                modified = html.escape(result['modified'][:10])
-
-                batch_text += f"<b>{i}. {name}</b>\n"
-                batch_text += f"📁 <i>Путь:</i> {path}\n"
-                batch_text += f"📦 <i>Размер:</i> {size}\n"
-                batch_text += f"📅 <i>Изменен:</i> {modified}\n\n"
-
-            # Определяем, нужно ли добавлять кнопки
-            is_last_batch = (batch_num == total_batches - 1)
-
-            if is_last_batch:
-                # В последнем сообщении все кнопки
-                current_markup = builder.as_markup()
-            else:
-                # В промежуточных сообщениях НЕТ кнопок
-                current_markup = None
-
-            # Отправляем батч
-            await self.send_long_message(
+            # Отправляем сообщение с файлом и кнопкой
+            await self.bot.send_message(
                 chat_id=chat_id,
-                text=batch_text,
-                reply_markup=current_markup,
+                text=file_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=builder.as_markup(),
                 disable_web_page_preview=True
             )
 
             # Небольшая пауза между сообщениями чтобы не спамить
-            if not is_last_batch:
-                await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
 
     async def send_long_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=True):
         """Отправляет длинное сообщение частями"""
@@ -259,7 +228,7 @@ class SearchBot:
             # Удаляем сообщение "Ищу..."
             await search_message.delete()
 
-            # Отправляем ВСЕ результаты частями
+            # Отправляем ВСЕ результаты - каждый файл отдельным сообщением с кнопкой
             await self.send_results_in_parts(
                 chat_id=message.chat.id,
                 all_results=data['results'],
@@ -290,6 +259,7 @@ class SearchBot:
 
                 file_text = f"""
 📄 <b>{name}</b>
+
 📁 <b>Путь:</b> {path}
                 """
 
@@ -305,6 +275,7 @@ class SearchBot:
                         url=file_info['download_link']
                     ))
 
+                # Редактируем исходное сообщение с файлом, добавляя ссылки
                 await callback_query.message.edit_text(
                     file_text,
                     parse_mode=ParseMode.HTML,
@@ -326,4 +297,3 @@ class SearchBot:
         finally:
             # Закрываем сессию при остановке бота
             await self.close_session()
-

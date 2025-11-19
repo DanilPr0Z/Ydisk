@@ -1,9 +1,9 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django.db.models import Q
 from .models import FileIndex
 from .utils.yandex_disk import YandexDiskClient
+from .views import SmartSearch
 import json
 
 
@@ -11,7 +11,7 @@ import json
 @require_http_methods(["GET", "POST"])
 def api_search(request):
     """
-    API для СУПЕРБЫСТРОГО поиска через базу данных
+    API для УМНОГО поиска как в Google
     """
     # Получаем поисковый запрос
     if request.method == 'POST':
@@ -26,54 +26,23 @@ def api_search(request):
     if not query:
         return JsonResponse({'error': 'Query parameter "q" is required'}, status=400)
 
-    query_lower = query.lower()
-    query_words = [word for word in query_lower.split() if len(word) > 2]
-    first_word = query_words[0] if query_words else query_lower
+    # Получаем ВСЕ файлы из базы
+    all_files_db = FileIndex.objects.all()
 
-    # БЫСТРЫЙ ПОИСК В БАЗЕ
-    if not query_words:
-        db_results = FileIndex.objects.filter(
-            search_vector__icontains=query_lower
-        )
-    else:
-        search_conditions = Q()
-        for word in query_words:
-            search_conditions |= Q(search_vector__icontains=word)
-
-        db_results = FileIndex.objects.filter(search_conditions)
-
-    # ВОЗВРАЩАЕМ ВСЕ РЕЗУЛЬТАТЫ БЕЗ ОГРАНИЧЕНИЙ
-    results = []
+    # Применяем умный поиск ко всем файлам
+    scored_results = []
     yandex_client = YandexDiskClient()
 
-    for file_item in db_results:
-        file_name_lower = file_item.name.lower()
+    for file_item in all_files_db:
+        # Вычисляем релевантность с помощью умного поиска
+        relevance = SmartSearch.smart_search(query, file_item.name)
 
-        match_score = 0
-        matched_words = []
-        has_first_word = False
-
-        if not query_words:
-            if query_lower in file_name_lower:
-                match_score = 100
-                matched_words = [query_lower]
-                has_first_word = True
-        else:
-            for i, word in enumerate(query_words):
-                if word in file_name_lower:
-                    match_score += 1
-                    matched_words.append(word)
-                    if i == 0:
-                        has_first_word = True
-
-        if match_score > 0:
-            relevance_percent = int((match_score / len(query_words)) * 100) if query_words else 100
-
+        if relevance > 10:  # Порог релевантности
             relative_path = yandex_client.get_relative_path(file_item.path)
             path_parts = relative_path.split('/')
             display_path = ' / '.join(path_parts[:-1]) if len(path_parts) > 1 else 'Корневая папка'
 
-            results.append({
+            scored_results.append({
                 'name': file_item.name,
                 'path': display_path,
                 'full_path': file_item.path,
@@ -83,24 +52,21 @@ def api_search(request):
                 'download_link': file_item.download_link,
                 'public_link': file_item.public_link,
                 'media_type': file_item.media_type,
-                'relevance': relevance_percent,
-                'matched_words': matched_words,
-                'has_first_word': has_first_word,
-                'match_score': match_score
+                'relevance': relevance
             })
 
-    # СОРТИРОВКА
-    results.sort(key=lambda x: (
-        not x['has_first_word'],
-        -x['match_score'],
-        -x['relevance']
-    ))
+    # Сортируем по релевантности (убывание)
+    scored_results.sort(key=lambda x: x['relevance'], reverse=True)
+
+    # Ограничиваем количество результатов
+    final_results = scored_results[:100]
 
     return JsonResponse({
         'query': query,
-        'results_count': len(results),
-        'results': results
+        'results_count': len(final_results),
+        'results': final_results
     })
+
 
 @csrf_exempt
 @require_http_methods(["GET"])
