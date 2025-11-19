@@ -1,6 +1,9 @@
 
 import requests
 import os
+import html
+import asyncio
+import aiohttp
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,35 +35,51 @@ class SearchBot:
         self.router = Router()
         self.dp.include_router(self.router)
 
+        # Создаем aiohttp сессию для асинхронных запросов
+        self.session = None
+
         # Регистрируем обработчики
         self.router.message.register(self.start, Command("start"))
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.handle_message, F.text)
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
 
+    async def get_session(self):
+        """Создает aiohttp сессию при необходимости"""
+        if self.session is None:
+            timeout = aiohttp.ClientTimeout(total=120)  # 60 секунд таймаут
+            self.session = aiohttp.ClientSession(timeout=timeout)
+        return self.session
+
+    async def close_session(self):
+        """Закрывает aiohttp сессию"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
     async def start(self, message: types.Message):
         """Обработчик команды /start"""
         welcome_text = """
-🔍 *Бот для поиска файлов в Cascate Cloud*
+🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
 
-*Доступные команды:*
-/search <запрос> - поиск файлов
-<текст> - быстрый поиск по тексту
+<b>Доступные команды:</b>
+/search &lt;запрос&gt; - поиск файлов
+&lt;текст&gt; - быстрый поиск по тексту
 
-*Примеры:*
-`/search Распашные двери`
-`Распашные двери ALTA`
-`инструкция установки`
+<b>Примеры:</b>
+<code>/search Распашные двери</code>
+<code>Распашные двери ALTA</code>
+<code>инструкция установки</code>
         """
-        await message.answer(welcome_text, parse_mode=ParseMode.MARKDOWN)
+        await message.answer(welcome_text, parse_mode=ParseMode.HTML)
 
     async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
         query = message.text.replace('/search', '').strip()
 
         if not query:
-            await message.answer("❌ Укажите поисковый запрос после команды\nПример: `/search инструкция`",
-                                 parse_mode=ParseMode.MARKDOWN)
+            await message.answer("❌ Укажите поисковый запрос после команды\nПример: <code>/search инструкция</code>",
+                                 parse_mode=ParseMode.HTML)
             return
 
         await self.perform_search(message, query, state)
@@ -76,55 +95,85 @@ class SearchBot:
         await self.perform_search(message, query, state)
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
-        """Выполняет поиск через API"""
+        """Выполняет поиск через API асинхронно"""
         try:
             # Показываем что бот работает
-            await message.answer(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
+            search_message = await message.answer(f"🔍 Ищу: <b>{html.escape(query)}</b>...",
+                                                  parse_mode=ParseMode.HTML)
 
-            # Вызываем API
-            response = requests.get(f"{self.api_url}?q={query}", timeout=30)
+            # Используем aiohttp для асинхронного запроса
+            session = await self.get_session()
 
-            if response.status_code != 200:
-                await message.answer("❌ Ошибка при поиске. Попробуйте позже.")
+            try:
+                async with session.get(f"{self.api_url}?q={query}") as response:
+                    if response.status != 200:
+                        await search_message.edit_text("❌ Ошибка при поиске. Попробуйте позже.")
+                        return
+
+                    data = await response.json()
+
+            except asyncio.TimeoutError:
+                await search_message.edit_text("⏰ Таймаут при поиске. Сервер долго не отвечает.")
                 return
-
-            data = response.json()
+            except Exception as e:
+                await search_message.edit_text("❌ Ошибка подключения к серверу.")
+                print(f"API connection error: {e}")
+                return
 
             if data['results_count'] == 0:
-                await message.answer(f"❌ По запросу '*{query}*' ничего не найдено",
-                                     parse_mode=ParseMode.MARKDOWN)
+                await search_message.edit_text(f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено",
+                                               parse_mode=ParseMode.HTML)
                 return
 
-            # Сохраняем результаты в состояние
+            # Сохраняем ВСЕ результаты в состояние
             await state.update_data(last_results=data['results'])
 
-            # Отправляем результаты
-            results_text = f"✅ Найдено *{data['results_count']}* файлов по запросу '*{query}*':\n\n"
+            # Формируем текст результатов с HTML разметкой
+            results_text = f"✅ Найдено <b>{data['results_count']}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
 
-            for i, result in enumerate(data['results'][:10]):  # Ограничиваем 10 результатами
-                results_text += f"*{i + 1}. {result['name']}*\n"
-                results_text += f"📁 Путь: {result['path']}\n"
-                results_text += f"📦 Размер: {result['size_formatted']}\n"
-                results_text += f"📅 Изменен: {result['modified'][:10]}\n\n"
+            # Показываем ВСЕ файлы в списке
+            for i, result in enumerate(data['results']):
+                name = html.escape(result['name'])
+                path = html.escape(result['path'])
+                size = html.escape(result['size_formatted'])
+                modified = html.escape(result['modified'][:10])
 
-            # Создаем кнопки для результатов
+                results_text += f"<b>{i + 1}. {name}</b>\n"
+                results_text += f"📁 <i>Путь:</i> {path}\n"
+                results_text += f"📦 <i>Размер:</i> {size}\n"
+                results_text += f"📅 <i>Изменен:</i> {modified}\n\n"
+
+            # Создаем кнопки для ВСЕХ результатов - ОДНА КНОПКА В СТРОКУ
             builder = InlineKeyboardBuilder()
-            for i, result in enumerate(data['results'][:100]):  # Максимум 5 кнопок
-                builder.add(InlineKeyboardButton(
-                    text=f"📎 {result['name'][:30]}...",
+
+            for i, result in enumerate(data['results']):
+                display_name = result['name']
+
+                # Обрезаем длинные названия, но оставляем читаемыми
+                if len(display_name) > 35:
+                    # Сохраняем расширение файла
+                    if '.' in display_name:
+                        name_part, ext = display_name.rsplit('.', 1)
+                        display_name = name_part[:32] + '...' + '.' + ext
+                    else:
+                        display_name = display_name[:35] + '...'
+
+                # Создаем кнопку с номером и названием файла - КАЖДАЯ КНОПКА В ОТДЕЛЬНОЙ СТРОКЕ
+                button_text = f"{i + 1}. {display_name}"
+
+                builder.row(InlineKeyboardButton(
+                    text=button_text,
                     callback_data=f"file_{i}"
                 ))
-            builder.adjust(1)  # По одной кнопке в строке
 
-            await message.answer(
+            # Редактируем исходное сообщение с результатами
+            await search_message.edit_text(
                 results_text,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=builder.as_markup(),
                 disable_web_page_preview=True
             )
 
-        except requests.exceptions.Timeout:
-            await message.answer("⏰ Таймаут при поиске. Попробуйте позже.")
         except Exception as e:
             await message.answer("❌ Произошла ошибка при поиске.")
             print(f"Bot error: {e}")
@@ -134,39 +183,42 @@ class SearchBot:
         try:
             file_index = int(callback_query.data.split('_')[1])
 
-            # Получаем сохраненные результаты
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
 
             if file_index < len(results):
                 file_info = results[file_index]
 
-                file_text = f"""
-*📄 {file_info['name']}*
+                name = html.escape(file_info['name'])
+                path = html.escape(file_info['path'])
+                size = html.escape(file_info['size_formatted'])
+                modified = html.escape(file_info['modified'][:10])
+                media_type = html.escape(file_info.get('media_type', 'Неизвестно'))
 
-*📁 Путь:* {file_info['path']}
-*📦 Размер:* {file_info['size_formatted']}
-*📅 Изменен:* {file_info['modified'][:10]}
-*🔗 Тип:* {file_info['media_type']}
+                file_text = f"""
+📄 <b>{name}</b>
+
+📁 <b>Путь:</b> {path}
+📦 <b>Размер:</b> {size}
+📅 <b>Изменен:</b> {modified}
+🔗 <b>Тип:</b> {media_type}
                 """
 
-                # Создаем кнопки для действий с файлом
                 builder = InlineKeyboardBuilder()
                 if file_info.get('public_link'):
-                    builder.add(InlineKeyboardButton(
+                    builder.row(InlineKeyboardButton(
                         text="🌐 Открыть в Яндекс.Диске",
                         url=file_info['public_link']
                     ))
                 if file_info.get('download_link'):
-                    builder.add(InlineKeyboardButton(
+                    builder.row(InlineKeyboardButton(
                         text="📥 Скачать файл",
                         url=file_info['download_link']
                     ))
-                builder.adjust(1)  # По одной кнопке в строке
 
                 await callback_query.message.edit_text(
                     file_text,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=ParseMode.HTML,
                     reply_markup=builder.as_markup(),
                     disable_web_page_preview=True
                 )
@@ -180,5 +232,9 @@ class SearchBot:
     async def run(self):
         """Запускает бота"""
         print("🤖 Бот запущен...")
-        await self.dp.start_polling(self.bot)
+        try:
+            await self.dp.start_polling(self.bot)
+        finally:
+            # Закрываем сессию при остановке бота
+            await self.close_session()
 

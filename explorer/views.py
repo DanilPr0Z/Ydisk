@@ -1,5 +1,8 @@
+
 from django.shortcuts import render
 from django.core.cache import cache
+from django.db.models import Q
+from .models import FileIndex
 from .utils.yandex_disk import YandexDiskClient
 import time
 import re
@@ -36,14 +39,8 @@ def index(request, path=''):
     start_time = time.time()
     yandex_client = YandexDiskClient()
 
-    # Кэшируем общее количество файлов
-    total_files_cache_key = "total_files_count_v3"
-    total_files_count = cache.get(total_files_cache_key)
-
-    if total_files_count is None:
-        all_files = yandex_client.get_flat_file_list()
-        total_files_count = len(all_files)
-        cache.set(total_files_cache_key, total_files_count, timeout=7200)
+    # Получаем общее количество файлов из базы (быстро!)
+    total_files_count = FileIndex.objects.count()
 
     # Кэшируем навигацию по текущей папке
     current_path = f"{yandex_client.root_folder}/{path}" if path else yandex_client.root_folder
@@ -72,28 +69,23 @@ def index(request, path=''):
                         'modified': item.get('modified', '')[:10]
                     })
                 elif item['type'] == 'file':
-                    files.append({
+                    # Получаем ссылки из базы данных (быстро!)
+                    file_index = FileIndex.objects.filter(path=item['path']).first()
+
+                    file_data = {
                         'name': item['name'],
                         'size': item.get('size', 0),
                         'modified': item.get('modified', '')[:10],
                         'path': item['path'],
-                        'media_type': item.get('media_type', 'file')
-                    })
+                        'media_type': item.get('media_type', 'file'),
+                        'file_type': FileView.get_file_type(item['name'], item.get('media_type', 'file'))
+                    }
 
-            # МАССОВОЕ получение ссылок для всех файлов
-            if files:
-                print(f"🔗 Getting links for {len(files)} files...")
-                file_paths = [{'path': file['path']} for file in files]
-                links_results = yandex_client.batch_get_links(file_paths)
+                    if file_index:
+                        file_data['download_link'] = file_index.download_link
+                        file_data['public_link'] = file_index.public_link
 
-                # Объединяем результаты
-                links_dict = {result['path']: result for result in links_results}
-
-                for file in files:
-                    file_links = links_dict.get(file['path'], {})
-                    file['download_link'] = file_links.get('download_link')
-                    file['public_link'] = file_links.get('public_link')
-                    file['file_type'] = FileView.get_file_type(file['name'], file['media_type'])
+                    files.append(file_data)
 
         # Кэшируем навигацию на 1 час
         cache.set(cache_key, (folders, files), timeout=3600)
@@ -126,7 +118,7 @@ def index(request, path=''):
 
 
 def search(request):
-    """ВЫСОКОПРОИЗВОДИТЕЛЬНЫЙ поиск с кэшированием и индексацией"""
+    """СУПЕРБЫСТРЫЙ поиск через базу данных"""
     query = request.GET.get('q', '').strip().lower()
 
     if not query:
@@ -139,67 +131,90 @@ def search(request):
         return render(request, 'explorer/search_results.html', context)
 
     start_time = time.time()
-    yandex_client = YandexDiskClient()
 
-    # Кэшируем результаты поиска
-    search_cache_key = f"search_{hash(query)}"
-    cached_results = cache.get(search_cache_key)
+    # РАЗБИВАЕМ ЗАПРОС НА СЛОВА
+    query_words = [word for word in query.split() if len(word) > 2]
+    first_word = query_words[0] if query_words else query
 
-    if cached_results:
-        print(f"✅ Using cached search results for: '{query}'")
-        results = cached_results
+    # БЫСТРЫЙ ПОИСК В БАЗЕ ДАННЫХ
+    if not query_words:
+        # Поиск по полной фразе
+        db_results = FileIndex.objects.filter(
+            search_vector__icontains=query
+        )
     else:
-        print(f"🔍 Performing high-performance search for: '{query}'")
+        # Поиск по словам - создаем условия для каждого слова
+        search_conditions = Q()
+        for word in query_words:
+            search_conditions |= Q(search_vector__icontains=word)
 
-        # Получаем все файлы
-        all_files = yandex_client.get_flat_file_list()
+        db_results = FileIndex.objects.filter(search_conditions)
 
-        # ОПТИМИЗИРОВАННЫЙ ПОИСК с предварительной обработкой
-        results = []
-        query_words = query.split()
+    # ПРЕОБРАЗУЕМ РЕЗУЛЬТАТЫ И ДОБАВЛЯЕМ РЕЛЕВАНТНОСТЬ
+    results = []
+    for file_item in db_results:
+        file_name_lower = file_item.name.lower()
 
-        for file_item in all_files:
-            file_name_lower = file_item['name'].lower()
+        # ВЫЧИСЛЯЕМ РЕЛЕВАНТНОСТЬ
+        match_score = 0
+        matched_words = []
+        has_first_word = False
 
-            # Быстрая проверка совпадения
-            match_found = False
-            if len(query_words) == 1:
-                # Одно слово - простое совпадение
-                match_found = query in file_name_lower
-            else:
-                # Несколько слов - проверяем все слова
-                match_found = all(word in file_name_lower for word in query_words)
+        if not query_words:
+            if query in file_name_lower:
+                match_score = 100
+                matched_words = [query]
+                has_first_word = True
+        else:
+            for i, word in enumerate(query_words):
+                if word in file_name_lower:
+                    match_score += 1
+                    matched_words.append(word)
+                    if i == 0:
+                        has_first_word = True
 
-            if match_found:
-                relative_path = yandex_client.get_relative_path(file_item['path'])
-                path_parts = relative_path.split('/')
+        if match_score > 0:
+            relevance_percent = int((match_score / len(query_words)) * 100) if query_words else 100
 
-                display_path = ' / '.join(path_parts[:-1]) if len(path_parts) > 1 else 'Корневая папка'
+            # Получаем отображаемый путь
+            yandex_client = YandexDiskClient()
+            relative_path = yandex_client.get_relative_path(file_item.path)
+            path_parts = relative_path.split('/')
+            display_path = ' / '.join(path_parts[:-1]) if len(path_parts) > 1 else 'Корневая папка'
 
-                # Получаем ссылки (кэшируются автоматически)
-                download_link = yandex_client.get_file_download_link(file_item['path'])
-                public_link = yandex_client.get_public_share_link(file_item['path'])
+            results.append({
+                'name': file_item.name,
+                'path': display_path,
+                'full_path': file_item.path,
+                'size': file_item.size,
+                'modified': file_item.modified,
+                'download_link': file_item.download_link,
+                'public_link': file_item.public_link,
+                'media_type': file_item.media_type,
+                'file_type': file_item.file_type,
+                'relevance': relevance_percent,
+                'matched_words': matched_words,
+                'has_first_word': has_first_word,
+                'match_score': match_score
+            })
 
-                file_type = FileView.get_file_type(file_item['name'], file_item.get('media_type', 'file'))
-
-                results.append({
-                    'name': file_item['name'],
-                    'path': display_path,
-                    'full_path': file_item['path'],
-                    'size': file_item.get('size', 0),
-                    'modified': file_item.get('modified', ''),
-                    'download_link': download_link,
-                    'public_link': public_link,
-                    'media_type': file_item.get('media_type', 'file'),
-                    'file_type': file_type
-                })
-
-        # Кэшируем результаты поиска на 30 минут
-        cache.set(search_cache_key, results, timeout=1800)
-        print(f"✅ Cached search results for: '{query}'")
+    # СОРТИРОВКА С ПРИОРИТЕТОМ
+    results.sort(key=lambda x: (
+        not x['has_first_word'],
+        -x['match_score'],
+        -x['relevance'],
+        x['name'].lower()
+    ))
 
     search_time = round(time.time() - start_time, 2)
-    print(f"🚀 Search completed in {search_time}s: {len(results)} results for '{query}'")
+
+    # Статистика
+    if results:
+        with_first_word = sum(1 for r in results if r['has_first_word'])
+        print(f"🚀 SUPER FAST DB Search: {len(results)} results for '{query}' "
+              f"in {search_time}s (с первым словом: {with_first_word})")
+    else:
+        print(f"❌ No results found for: '{query}'")
 
     context = {
         'query': query,
