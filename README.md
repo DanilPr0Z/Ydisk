@@ -3,3 +3,6 @@ python manage.py runserver
 Открываем первый раз сайт он начинает загружать всё из Яндекс Диска по API займёт не много времени
 Далее для запуска Тг бота с функцией поиска:
 python run_bot.py runserver в отдельном терминале желательно
+
+
+python manage.py update_file_index --workers=32 --batch-size=200 ------ если есть какие то обновление в ЯД
