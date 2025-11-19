@@ -43,6 +43,7 @@ class SearchBot:
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.handle_message, F.text)
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
+        self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
     async def get_session(self):
         """Создает aiohttp сессию при необходимости"""
@@ -93,48 +94,84 @@ class SearchBot:
 
         await self.perform_search(message, query, state)
 
-    def split_message(self, text, max_length=4000):
-        """Разбивает длинное сообщение на части"""
-        if len(text) <= max_length:
-            return [text]
+    async def delete_messages_batch(self, chat_id, message_ids):
+        """Быстрое удаление сообщений пачками"""
+        if not message_ids:
+            return
 
-        parts = []
-        while text:
-            if len(text) <= max_length:
-                parts.append(text)
-                break
+        # Создаем задачи для асинхронного удаления
+        delete_tasks = []
+        for msg_id in message_ids:
+            try:
+                # Создаем задачу удаления, но не ждем ее выполнения сразу
+                task = asyncio.create_task(
+                    self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                )
+                delete_tasks.append(task)
+            except Exception as e:
+                print(f"Error creating delete task for message {msg_id}: {e}")
+                continue
 
-            # Ищем место для разбивки (последний перенос строки перед лимитом)
-            split_pos = text.rfind('\n', 0, max_length)
-            if split_pos == -1:
-                # Если нет переносов, разбиваем по границе слова
-                split_pos = text.rfind(' ', 0, max_length)
-            if split_pos == -1:
-                # Если нет пробелов, просто обрезаем
-                split_pos = max_length
+        # Ждем завершения всех задач удаления с таймаутом
+        if delete_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*delete_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                print("Timeout while deleting messages batch")
+            except Exception as e:
+                print(f"Error in batch delete: {e}")
 
-            parts.append(text[:split_pos])
-            text = text[split_pos:].lstrip()
+    async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
+        """Отправляет одну страницу результатов (10 файлов)"""
+        page_size = 10
+        start_idx = page * page_size
+        end_idx = start_idx + page_size
+        page_results = all_results[start_idx:end_idx]
 
-        return parts
-
-    async def send_results_in_parts(self, chat_id, all_results, query, state):
-        """Отправляет каждый файл отдельным сообщением с кнопкой"""
         total_files = len(all_results)
+        total_pages = (total_files + page_size - 1) // page_size
 
-        # Сохраняем ВСЕ результаты в состояние
-        await state.update_data(last_results=all_results)
-
-        # Сначала отправляем заголовок с количеством найденных файлов
-        header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
-        await self.bot.send_message(
-            chat_id=chat_id,
-            text=header_text,
-            parse_mode=ParseMode.HTML
+        # Сохраняем все результаты и текущую страницу в состояние
+        await state.update_data(
+            last_results=all_results,
+            current_page=page,
+            current_query=query
         )
 
-        # Отправляем каждый файл отдельным сообщением с кнопкой
-        for i, result in enumerate(all_results):
+        # Если есть предыдущие сообщения - удаляем их асинхронно
+        if previous_messages:
+            # Запускаем удаление в фоне, не ждем завершения
+            asyncio.create_task(
+                self.delete_messages_batch(chat_id, previous_messages)
+            )
+
+        current_messages = []
+
+        # Отправляем заголовок для первой страницы
+        if page == 0:
+            header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
+            header_msg = await self.bot.send_message(
+                chat_id=chat_id,
+                text=header_text,
+                parse_mode=ParseMode.HTML
+            )
+            current_messages.append(header_msg.message_id)
+        else:
+            # Для последующих страниц показываем заголовок с номером страницы
+            header_text = f"📄 <b>Страница {page + 1}</b> | Найдено <b>{total_files}</b> файлов\n"
+            header_msg = await self.bot.send_message(
+                chat_id=chat_id,
+                text=header_text,
+                parse_mode=ParseMode.HTML
+            )
+            current_messages.append(header_msg.message_id)
+
+        # Быстро отправляем все файлы на странице
+        send_tasks = []
+        for i, result in enumerate(page_results, start=start_idx + 1):
             # Формируем текст для файла
             name = html.escape(result['name'])
             path = html.escape(result['path'])
@@ -151,20 +188,60 @@ class SearchBot:
             builder = InlineKeyboardBuilder()
             builder.row(InlineKeyboardButton(
                 text="📋 Получить ссылки на файл",
-                callback_data=f"file_{i}"
+                callback_data=f"file_{i - 1}"  # Индекс в массиве результатов
             ))
 
-            # Отправляем сообщение с файлом и кнопкой
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=file_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=builder.as_markup(),
-                disable_web_page_preview=True
+            # Создаем задачу отправки сообщения
+            task = asyncio.create_task(
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=file_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=builder.as_markup(),
+                    disable_web_page_preview=True
+                )
             )
+            send_tasks.append((task, i))
 
-            # Небольшая пауза между сообщениями чтобы не спамить
-            await asyncio.sleep(0.1)
+        # Ждем завершения отправки всех сообщений и собираем их ID
+        for task, file_num in send_tasks:
+            try:
+                file_msg = await task
+                current_messages.append(file_msg.message_id)
+            except Exception as e:
+                print(f"Error sending file message {file_num}: {e}")
+
+        # Добавляем кнопку навигации
+        nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
+
+        nav_builder = InlineKeyboardBuilder()
+
+        # Если есть еще файлы, добавляем кнопку "Показать еще"
+        if end_idx < total_files:
+            nav_builder.row(InlineKeyboardButton(
+                text="➡️ Показать еще",
+                callback_data=f"more_{page + 1}"
+            ))
+
+        # Всегда добавляем кнопку "В начало" кроме первой страницы
+        if page > 0:
+            nav_builder.row(InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"more_{page - 1}"
+            ))
+
+        nav_msg = await self.bot.send_message(
+            chat_id=chat_id,
+            text=nav_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=nav_builder.as_markup() if nav_builder.buttons else None
+        )
+        current_messages.append(nav_msg.message_id)
+
+        # Сохраняем ID текущих сообщений для возможности удаления
+        await state.update_data(current_messages=current_messages)
+
+        return current_messages
 
     async def send_long_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=True):
         """Отправляет длинное сообщение частями"""
@@ -172,7 +249,7 @@ class SearchBot:
 
         for i, part in enumerate(parts):
             is_last_part = (i == len(parts) - 1)
-            current_markup = reply_markup if is_last_part else None  # Клавиатура только в последней части
+            current_markup = reply_markup if is_last_part else None
 
             try:
                 await self.bot.send_message(
@@ -184,16 +261,6 @@ class SearchBot:
                 )
             except Exception as e:
                 print(f"Error sending message part {i}: {e}")
-                # Пытаемся отправить без разметки если есть ошибка
-                try:
-                    await self.bot.send_message(
-                        chat_id=chat_id,
-                        text=part[:4000],
-                        reply_markup=current_markup,
-                        disable_web_page_preview=disable_web_page_preview
-                    )
-                except Exception as e2:
-                    print(f"Error sending plain text part: {e2}")
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
@@ -228,12 +295,13 @@ class SearchBot:
             # Удаляем сообщение "Ищу..."
             await search_message.delete()
 
-            # Отправляем ВСЕ результаты - каждый файл отдельным сообщением с кнопкой
-            await self.send_results_in_parts(
+            # Отправляем первую страницу результатов
+            await self.send_results_page(
                 chat_id=message.chat.id,
                 all_results=data['results'],
                 query=query,
-                state=state
+                state=state,
+                page=0
             )
 
         except Exception as e:
@@ -241,7 +309,7 @@ class SearchBot:
             print(f"Bot error: {e}")
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработчик нажатий на кнопки"""
+        """Обработчик нажатий на кнопки файлов"""
         try:
             file_index = int(callback_query.data.split('_')[1])
 
@@ -288,6 +356,37 @@ class SearchBot:
         except Exception as e:
             await callback_query.answer("❌ Ошибка при получении информации о файле")
             print(f"Callback error: {e}")
+
+    async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
+        """Обработчик кнопки навигации"""
+        try:
+            page = int(callback_query.data.split('_')[1])
+
+            user_data = await state.get_data()
+            results = user_data.get('last_results', [])
+            query = user_data.get('current_query', '')
+            previous_messages = user_data.get('current_messages', [])
+
+            if not results:
+                await callback_query.answer("❌ Результаты поиска устарели")
+                return
+
+            # Показываем что загружаем следующую страницу
+            await callback_query.answer("⏳ Загружаем...")
+
+            # Отправляем следующую страницу, удаляя предыдущие сообщения
+            await self.send_results_page(
+                chat_id=callback_query.message.chat.id,
+                all_results=results,
+                query=query,
+                state=state,
+                page=page,
+                previous_messages=previous_messages
+            )
+
+        except Exception as e:
+            await callback_query.answer("❌ Ошибка при загрузке файлов")
+            print(f"More callback error: {e}")
 
     async def run(self):
         """Запускает бота"""

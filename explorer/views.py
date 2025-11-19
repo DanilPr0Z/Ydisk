@@ -7,6 +7,8 @@ from .utils.yandex_disk import YandexDiskClient
 import time
 import re
 import difflib
+import concurrent.futures
+import threading
 
 
 class FileView:
@@ -364,78 +366,267 @@ def search(request):
     return render(request, 'explorer/search_results.html', context)
 
 
-
-# Остальные функции остаются без изменений
-def content(request):
-    """Страница содержания с интерактивными списками"""
-    yandex_client = YandexDiskClient()
-
-    # Ищем файл содержания
-    content_file_name = "00. Содержание папок на Яндекс Диске фабрики.docx"
-    content_file_path = None
-
-    # Получаем все файлы чтобы найти файл содержания
-    all_files = yandex_client.get_flat_file_list()
-
-    for file_item in all_files:
-        if file_item['name'] == content_file_name:
-            content_file_path = file_item['path']
-            content_download_link = yandex_client.get_file_download_link(content_file_path)
-            content_public_link = yandex_client.get_public_share_link(content_file_path)
-            break
-
-    # Получаем структуру папок для содержания
-    folder_structure = get_folder_structure(yandex_client)
-
-    context = {
-        'title': 'Содержание',
-        'content_file_name': content_file_name,
-        'content_file_path': content_file_path,
-        'content_download_link': content_download_link,
-        'content_public_link': content_public_link,
-        'folder_structure': folder_structure,
-        'has_content_file': content_file_path is not None
-    }
-
-    return render(request, 'explorer/content.html', context)
+# Глобальная переменная для хранения автоматического содержания
+_AUTO_CONTENT_CACHE = None
 
 
-def get_folder_structure(yandex_client):
-    """Получает структуру папок для содержания"""
+class ContentBuilder:
+    """Класс для многопоточного построения древовидного содержания"""
 
-    def build_folder_tree(path=''):
-        """Рекурсивно строит дерево папок"""
-        items = yandex_client.get_folder_contents(path)
-        if not items:
+    def __init__(self, max_workers=15):
+        self.yandex_client = YandexDiskClient()
+        self.max_workers = max_workers
+        self.folder_links_cache = {}
+        self.cache_lock = threading.Lock()
+
+    def get_folder_public_link_threadsafe(self, folder_path):
+        """Потокобезопасное получение публичной ссылки для папки"""
+        with self.cache_lock:
+            if folder_path in self.folder_links_cache:
+                return self.folder_links_cache[folder_path]
+
+        # Получаем ссылку
+        public_link = self.yandex_client.get_folder_public_link(folder_path)
+
+        with self.cache_lock:
+            self.folder_links_cache[folder_path] = public_link
+
+        return public_link
+
+    def get_folder_contents_only_dirs(self, path):
+        """Получает содержимое папки ТОЛЬКО папки (игнорирует файлы)"""
+        try:
+            items = self.yandex_client.get_folder_contents(path)
+            if not items:
+                return []
+
+            # ФИЛЬТРУЕМ - оставляем ТОЛЬКО папки
+            folders = [item for item in items if item['type'] == 'dir']
+            return folders
+
+        except Exception as e:
+            print(f"Error getting folder contents for {path}: {e}")
             return []
 
-        structure = []
-        for item in items:
-            if item['type'] == 'dir':
-                # Получаем публичную ссылку для папки
-                folder_public_link = yandex_client.get_public_share_link(item['path'])
+    def build_folder_tree_parallel(self, path=''):
+        """Строит древовидную структуру папок многопоточно"""
+        try:
+            # Получаем ТОЛЬКО папки в текущей директории
+            folders = self.get_folder_contents_only_dirs(path)
+            if not folders:
+                return []
 
+            # Получаем публичные ссылки для текущего уровня папок многопоточно
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Создаем задачи для получения ссылок
+                link_futures = {
+                    executor.submit(self.get_folder_public_link_threadsafe, folder['path']): folder
+                    for folder in folders
+                }
+
+                # Собираем ссылки
+                folder_links = {}
+                for future in concurrent.futures.as_completed(link_futures):
+                    folder = link_futures[future]
+                    try:
+                        public_link = future.result()
+                        folder_links[folder['path']] = public_link
+                    except Exception as e:
+                        print(f"Error getting link for {folder['path']}: {e}")
+                        folder_links[folder['path']] = None
+
+            # Рекурсивно строим дерево для дочерних папок многопоточно
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Создаем задачи для построения дочерних структур
+                children_futures = {
+                    executor.submit(self.build_folder_tree_parallel, folder['path']): folder
+                    for folder in folders
+                }
+
+                # Собираем дочерние структуры
+                children_structures = {}
+                for future in concurrent.futures.as_completed(children_futures):
+                    folder = children_futures[future]
+                    try:
+                        children_structure = future.result()
+                        children_structures[folder['path']] = children_structure
+                    except Exception as e:
+                        print(f"Error building children for {folder['path']}: {e}")
+                        children_structures[folder['path']] = []
+
+            # Собираем финальную древовидную структуру в формате для твоего шаблона
+            tree_structure = []
+            for folder in folders:
                 folder_data = {
-                    'name': item['name'],
-                    'path': item['path'],
-                    'public_link': folder_public_link,
-                    'children': build_folder_tree(item['path']),
-                    'type': 'folder'
+                    'name': folder['name'],
+                    'public_link': folder_links.get(folder['path']),
+                    'path': folder['path'],
+                    'type': 'folder',
+                    'children': children_structures.get(folder['path'], [])
                 }
-                structure.append(folder_data)
-            elif item['type'] == 'file':
-                file_public_link = yandex_client.get_public_share_link(item['path'])
-                file_data = {
-                    'name': item['name'],
-                    'path': item['path'],
-                    'public_link': file_public_link,
-                    'type': 'file'
-                }
-                structure.append(file_data)
+                tree_structure.append(folder_data)
 
-        return structure
+            return tree_structure
 
-    return build_folder_tree(yandex_client.root_folder)
+        except Exception as e:
+            print(f"Error building folder tree for {path}: {e}")
+            return []
+
+    def convert_tree_to_accordion_format(self, folder_tree):
+        """Конвертирует древовидную структуру в формат для аккордеона"""
+        content_structure = []
+        category_id = 1
+
+        # Основные категории для группировки верхнего уровня
+        main_categories = {
+            'Алюминиевые Двери': ['алюмин', 'alum', 'fly', 'livia', 'milano', 'next', 'astra', 'cristal', 'alta'],
+            'Тамбуратные Двери': ['тамбурат', 'tamburat', 'nuovo', 'rock', 'complanar'],
+            'Гардеробы': ['гардероб', 'гардеробн', 'wardrobe', 'шкаф', 'avola', 'ampio', 'fiato', 'spirito'],
+            'Мебель': ['мебель', 'furniture', 'стеллаж', 'strada', 'lego', 'romb', 'кубо', 'kubo'],
+            'Мягкая мебель': ['диван', 'кровать', 'sofa', 'bed', 'мягк', 'soft', 'pezzo', 'tina', 'gina'],
+            'Стеновые панели': ['стенов', 'wall', 'панел', 'panel'],
+            'Столы': ['стол', 'table', 'desk'],
+            'Инструкции': ['инструкц', 'instruction', 'manual', 'монтаж', 'установк'],
+            'Сервисные видео': ['видео', 'video', 'сервис', 'service', 'рекламац'],
+            'Информационные письма': ['письмо', 'letter', 'рассылка', 'announce', 'анонс'],
+            'Прайсы': ['прайс', 'price', 'стоимость', 'cost'],
+            'Каталоги': ['каталог', 'catalog', 'брошюр', 'brochure'],
+            'Бланки': ['бланк', 'form', 'акт', 'act', 'заявк'],
+            'Фото продукции': ['фото', 'photo', 'изображен', 'image', 'рендер']
+        }
+
+        # Функция для поиска папок по ключевым словам
+        def find_folders_by_keywords(tree, keywords):
+            found_folders = []
+
+            def search_recursive(items):
+                for item in items:
+                    item_name_lower = item['name'].lower()
+                    # Проверяем совпадение с ключевыми словами
+                    if any(keyword in item_name_lower for keyword in keywords):
+                        found_folders.append(item)
+                    # Рекурсивно ищем в дочерних папках
+                    if item['children']:
+                        search_recursive(item['children'])
+
+            search_recursive(tree)
+            return found_folders
+
+        # Функция для преобразования древовидной структуры в плоский список с подпунктами
+        def convert_folder_to_items(folder):
+            items = []
+
+            for child in folder.get('children', []):
+                if child['children']:
+                    # Если у папки есть дети, создаем подпункт с вложенными элементами
+                    subitems = []
+                    for subchild in child['children']:
+                        subitems.append({
+                            'title': subchild['name'],
+                            'link': subchild.get('public_link')
+                        })
+
+                    items.append({
+                        'title': child['name'],
+                        'subitems': subitems
+                    })
+                else:
+                    # Обычный пункт без вложенности
+                    items.append({
+                        'title': child['name'],
+                        'link': child.get('public_link')
+                    })
+
+            return items
+
+        # Создаем структуру для аккордеона
+        used_folders = set()
+
+        for category_name, keywords in main_categories.items():
+            category_folders = find_folders_by_keywords(folder_tree, keywords)
+
+            # Добавляем только уникальные папки верхнего уровня
+            unique_folders = []
+            for folder in category_folders:
+                if folder['path'] not in used_folders:
+                    unique_folders.append(folder)
+                    used_folders.add(folder['path'])
+
+            if unique_folders:
+                # Для каждой категории берем первую подходящую папку как основную
+                main_folder = unique_folders[0] if unique_folders else None
+
+                if main_folder:
+                    content_structure.append({
+                        'id': category_id,
+                        'title': category_name,
+                        'link': main_folder.get('public_link'),
+                        'items': convert_folder_to_items(main_folder)
+                    })
+                    category_id += 1
+
+        # Добавляем оставшиеся папки в категорию "Прочие папки"
+        def get_all_remaining_folders(tree, excluded_paths):
+            remaining = []
+
+            def collect_recursive(items):
+                for item in items:
+                    if item['path'] not in excluded_paths:
+                        remaining.append(item)
+                    if item['children']:
+                        collect_recursive(item['children'])
+
+            collect_recursive(tree)
+            return remaining
+
+        remaining_folders = get_all_remaining_folders(folder_tree, used_folders)
+        if remaining_folders:
+            # Берем первую оставшуюся папку как основную для категории "Прочие"
+            main_remaining = remaining_folders[0] if remaining_folders else None
+            if main_remaining:
+                content_structure.append({
+                    'id': category_id,
+                    'title': 'Прочие папки',
+                    'link': main_remaining.get('public_link'),
+                    'items': convert_folder_to_items(main_remaining)
+                })
+
+        return content_structure
+
+    def build_content_structure(self):
+        """Строит древовидное содержание и конвертирует в формат для аккордеона"""
+        print(f"🚀 MULTITHREADED TREE: Building folder tree structure with {self.max_workers} threads...")
+        start_time = time.time()
+
+        # Строим полное древовидное содержание
+        folder_tree = self.build_folder_tree_parallel(self.yandex_client.root_folder)
+
+        # Конвертируем в формат для твоего аккордеона
+        accordion_structure = self.convert_tree_to_accordion_format(folder_tree)
+
+        total_time = time.time() - start_time
+
+        # Считаем общее количество элементов
+        total_items = sum(len(section['items']) for section in accordion_structure)
+        print(
+            f"✅ MULTITHREADED TREE: Content structure built in {total_time:.2f}s - {len(accordion_structure)} sections, {total_items} total items")
+
+        return accordion_structure
+
+
+def get_auto_content_structure():
+    """Автоматически генерирует структуру содержания в формате для твоего шаблона"""
+    global _AUTO_CONTENT_CACHE
+
+    # Используем глобальный кэш чтобы содержание сохранялось до перезапуска приложения
+    if _AUTO_CONTENT_CACHE is not None:
+        return _AUTO_CONTENT_CACHE
+
+    # Строим древовидное содержание многопоточно
+    content_builder = ContentBuilder(max_workers=15)
+    _AUTO_CONTENT_CACHE = content_builder.build_content_structure()
+
+    return _AUTO_CONTENT_CACHE
 
 
 def content_page(request):
@@ -946,6 +1137,22 @@ def content_page(request):
 
     context = {
         'content_structure': content_structure,
+        'title': 'Автоматическое содержание Яндекс.Диска',
+        'is_auto_content': True
     }
 
     return render(request, 'explorer/content.html', context)
+
+
+# Старая функция content оставлена для обратной совместимости
+def content(request):
+    """Страница содержания (редирект на автоматическое содержание)"""
+    return content_page(request)
+
+
+def clear_content_cache(request):
+    """Очистка кэша содержания (для админов)"""
+    global _AUTO_CONTENT_CACHE
+    _AUTO_CONTENT_CACHE = None
+    return render(request, 'explorer/cache_cleared.html')
+
