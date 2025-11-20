@@ -53,7 +53,8 @@ class SearchBot:
     async def is_user_member_of_any_group(self, user_id: int) -> bool:
         """Проверяет, является ли пользователь участником любой из разрешенных групп"""
         if not self.allowed_group_ids:
-            return False
+            # Если группы не указаны, доступ разрешен всем
+            return True
 
         for group_id in self.allowed_group_ids:
             try:
@@ -70,12 +71,17 @@ class SearchBot:
         if not await self.is_user_member_of_any_group(message.from_user.id):
             groups_info = "\n".join([f"• <code>{group_id}</code>" for group_id in self.allowed_group_ids])
 
-            await message.answer(
-                "❌ <b>Доступ запрещен</b>\n\n"
-                "Этот бот доступен только для участников разрешенных групп.\n"
-                "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
-                parse_mode=ParseMode.HTML
-            )
+            access_denied_text = "❌ <b>Доступ запрещен</b>\n\n"
+
+            if self.allowed_group_ids:
+                access_denied_text += (
+                    "Этот бот доступен только для участников разрешенных групп.\n"
+                    "Пожалуйста, вступите в одну из групп чтобы использовать бота."
+                )
+            else:
+                access_denied_text += "Настройки доступа не настроены. Обратитесь к администратору."
+
+            await message.answer(access_denied_text, parse_mode=ParseMode.HTML)
             return False
         return True
 
@@ -137,10 +143,13 @@ class SearchBot:
                 parts.append(text)
                 break
 
+            # Ищем место для разбивки (последний перенос строки перед лимитом)
             split_pos = text.rfind('\n', 0, max_length)
             if split_pos == -1:
+                # Если нет переносов, разбиваем по границе слова
                 split_pos = text.rfind(' ', 0, max_length)
             if split_pos == -1:
+                # Если нет пробелов, просто обрезаем
                 split_pos = max_length
 
             parts.append(text[:split_pos])
@@ -174,8 +183,87 @@ class SearchBot:
             except Exception:
                 pass
 
+    async def send_results_in_parts(self, chat_id, all_results, query, state):
+        """Отправляет все результаты частями с кнопками (оригинальный метод из первого файла)"""
+        total_files = len(all_results)
+
+        # Сохраняем ВСЕ результаты в состояние
+        await state.update_data(last_results=all_results)
+
+        # Создаем кнопки для ВСЕХ результатов
+        builder = InlineKeyboardBuilder()
+
+        for i, result in enumerate(all_results):
+            display_name = result['name']
+
+            # Обрезаем длинные названия, но оставляем читаемыми
+            if len(display_name) > 35:
+                if '.' in display_name:
+                    name_part, ext = display_name.rsplit('.', 1)
+                    display_name = name_part[:32] + '...' + '.' + ext
+                else:
+                    display_name = display_name[:35] + '...'
+
+            button_text = f"{i + 1}. {display_name}"
+
+            builder.row(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"file_{i}"
+            ))
+
+        # Разбиваем результаты на батчи по 10 файлов для лучшей читаемости
+        batch_size = 10
+        total_batches = (total_files + batch_size - 1) // batch_size
+
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min((batch_num + 1) * batch_size, total_files)
+            batch_results = all_results[start_idx:end_idx]
+
+            # Формируем текст для батча
+            if batch_num == 0:
+                # Первое сообщение с заголовком
+                batch_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
+            else:
+                # Последующие сообщения
+                batch_text = f"📄 Файлы {start_idx + 1}-{end_idx} из {total_files}:\n\n"
+
+            # Добавляем файлы батча
+            for i, result in enumerate(batch_results, start=start_idx + 1):
+                name = html.escape(result['name'])
+                path = html.escape(result['path'])
+                size = html.escape(result['size_formatted'])
+                modified = html.escape(result['modified'][:10])
+
+                batch_text += f"<b>{i}. {name}</b>\n"
+                batch_text += f"📁 <i>Путь:</i> {path}\n"
+                batch_text += f"📦 <i>Размер:</i> {size}\n"
+                batch_text += f"📅 <i>Изменен:</i> {modified}\n\n"
+
+            # Определяем, нужно ли добавлять кнопки
+            is_last_batch = (batch_num == total_batches - 1)
+
+            if is_last_batch:
+                # В последнем сообщении все кнопки
+                current_markup = builder.as_markup()
+            else:
+                # В промежуточных сообщениях НЕТ кнопок
+                current_markup = None
+
+            # Отправляем батч
+            await self.send_long_message(
+                chat_id=chat_id,
+                text=batch_text,
+                reply_markup=current_markup,
+                disable_web_page_preview=True
+            )
+
+            # Небольшая пауза между сообщениями чтобы не спамить
+            if not is_last_batch:
+                await asyncio.sleep(0.3)
+
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
-        """Отправляет одну страницу результатов (10 файлов)"""
+        """Отправляет одну страницу результатов (10 файлов) - метод из второго файла"""
         page_size = 10
         start_idx = page * page_size
         end_idx = start_idx + page_size
@@ -284,7 +372,7 @@ class SearchBot:
 
         for i, part in enumerate(parts):
             is_last_part = (i == len(parts) - 1)
-            current_markup = reply_markup if is_last_part else None
+            current_markup = reply_markup if is_last_part else None  # Клавиатура только в последней части
 
             try:
                 await self.bot.send_message(
@@ -296,10 +384,21 @@ class SearchBot:
                 )
             except Exception as e:
                 print(f"Error sending message part {i}: {e}")
+                # Пытаемся отправить без разметки если есть ошибка
+                try:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=part[:4000],
+                        reply_markup=current_markup,
+                        disable_web_page_preview=disable_web_page_preview
+                    )
+                except Exception as e2:
+                    print(f"Error sending plain text part: {e2}")
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
         try:
+            # Показываем что бот работает
             search_message = await message.answer(f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                                                   parse_mode=ParseMode.HTML)
 
@@ -318,6 +417,7 @@ class SearchBot:
                 return
             except Exception as e:
                 await search_message.edit_text("❌ Ошибка подключения к серверу.")
+                print(f"API connection error: {e}")
                 return
 
             if data['results_count'] == 0:
@@ -325,8 +425,10 @@ class SearchBot:
                                                parse_mode=ParseMode.HTML)
                 return
 
+            # Удаляем сообщение "Ищу..."
             await search_message.delete()
 
+            # Используем новый метод с пагинацией из второго файла
             await self.send_results_page(
                 chat_id=message.chat.id,
                 all_results=data['results'],
@@ -337,6 +439,7 @@ class SearchBot:
 
         except Exception as e:
             await message.answer("❌ Произошла ошибка при поиске.")
+            print(f"Bot error: {e}")
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки файлов"""
@@ -388,6 +491,7 @@ class SearchBot:
 
         except Exception as e:
             await callback_query.answer("❌ Ошибка при получении информации о файле")
+            print(f"Callback error: {e}")
 
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопки навигации"""
@@ -420,6 +524,7 @@ class SearchBot:
 
         except Exception as e:
             await callback_query.answer("❌ Ошибка при загрузке файлов")
+            print(f"More callback error: {e}")
 
     async def get_session(self):
         """Создает aiohttp сессию при необходимости"""
@@ -440,4 +545,5 @@ class SearchBot:
         try:
             await self.dp.start_polling(self.bot)
         finally:
+            # Закрываем сессию при остановке бота
             await self.close_session()
