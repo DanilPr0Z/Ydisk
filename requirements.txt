@@ -1,7 +1,5 @@
-Django
-aiogram
-requests
-python-dotenv
-aiohttp
-dotenv
-asyncio
+Django>=4.2,<5.0
+aiogram==3.10.0
+requests==2.31.0
+python-dotenv==1.0.0
+aiohttp==3.9.1
