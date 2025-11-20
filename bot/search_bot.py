@@ -1,4 +1,3 @@
-
 import requests
 import os
 import html
@@ -25,6 +24,7 @@ class SearchBot:
     def __init__(self):
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.api_url = os.getenv('SITE_API_URL', 'http://localhost:8000/api/search/')
+        self.allowed_group_id = os.getenv('ALLOWED_GROUP_ID', '-1001234567890')  # ID группы
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
@@ -45,21 +45,34 @@ class SearchBot:
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
-    async def get_session(self):
-        """Создает aiohttp сессию при необходимости"""
-        if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=60)
-            self.session = aiohttp.ClientSession(timeout=timeout)
-        return self.session
+    async def is_user_member(self, user_id: int) -> bool:
+        """Проверяет, является ли пользователь участником разрешенной группы"""
+        try:
+            member = await self.bot.get_chat_member(chat_id=self.allowed_group_id, user_id=user_id)
+            # Проверяем что пользователь не left/kicked/banned
+            return member.status in ['member', 'administrator', 'creator']
+        except Exception as e:
+            print(f"Error checking membership for user {user_id}: {e}")
+            return False
 
-    async def close_session(self):
-        """Закрывает aiohttp сессию"""
-        if self.session:
-            await self.session.close()
-            self.session = None
+    async def check_access(self, message: types.Message) -> bool:
+        """Проверяет доступ и отправляет сообщение если доступ запрещен"""
+        if not await self.is_user_member(message.from_user.id):
+            await message.answer(
+                "❌ <b>Доступ запрещен</b>\n\n"
+                "Этот бот доступен только для участников группы Cascate Cloud.\n"
+                "Пожалуйста, вступите в группу чтобы использовать бота.",
+                parse_mode=ParseMode.HTML
+            )
+            return False
+        return True
 
     async def start(self, message: types.Message):
         """Обработчик команды /start"""
+        # Проверяем доступ
+        if not await self.check_access(message):
+            return
+
         welcome_text = """
 🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
 
@@ -76,6 +89,10 @@ class SearchBot:
 
     async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
+        # Проверяем доступ
+        if not await self.check_access(message):
+            return
+
         query = message.text.replace('/search', '').strip()
 
         if not query:
@@ -87,6 +104,10 @@ class SearchBot:
 
     async def handle_message(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений (быстрый поиск)"""
+        # Проверяем доступ
+        if not await self.check_access(message):
+            return
+
         query = message.text.strip()
 
         if query.startswith('/'):
