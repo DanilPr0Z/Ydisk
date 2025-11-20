@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatType
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -24,7 +24,10 @@ class SearchBot:
     def __init__(self):
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.api_url = os.getenv('SITE_API_URL', 'http://localhost:8000/api/search/')
-        self.allowed_group_id = os.getenv('ALLOWED_GROUP_ID', '-1001234567890')  # ID группы
+
+        # Получаем ID разрешенных групп из .env
+        allowed_groups = os.getenv('ALLOWED_GROUP_IDS', '')
+        self.allowed_group_ids = [group_id.strip() for group_id in allowed_groups.split(',') if group_id.strip()]
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
@@ -38,38 +41,46 @@ class SearchBot:
         # Создаем aiohttp сессию для асинхронных запросов
         self.session = None
 
-        # Регистрируем обработчики
-        self.router.message.register(self.start, Command("start"))
-        self.router.message.register(self.search_command, Command("search"))
-        self.router.message.register(self.handle_message, F.text)
+        # Регистрируем обработчики ТОЛЬКО для приватных чатов
+        self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
+        self.router.message.register(self.search_command, Command("search"), F.chat.type == ChatType.PRIVATE)
+        self.router.message.register(self.handle_message, F.text, F.chat.type == ChatType.PRIVATE)
+
+        # Callback обработчики
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
-    async def is_user_member(self, user_id: int) -> bool:
-        """Проверяет, является ли пользователь участником разрешенной группы"""
-        try:
-            member = await self.bot.get_chat_member(chat_id=self.allowed_group_id, user_id=user_id)
-            # Проверяем что пользователь не left/kicked/banned
-            return member.status in ['member', 'administrator', 'creator']
-        except Exception as e:
-            print(f"Error checking membership for user {user_id}: {e}")
+    async def is_user_member_of_any_group(self, user_id: int) -> bool:
+        """Проверяет, является ли пользователь участником любой из разрешенных групп"""
+        if not self.allowed_group_ids:
             return False
+
+        for group_id in self.allowed_group_ids:
+            try:
+                member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
+                if member.status in ['member', 'administrator', 'creator']:
+                    return True
+            except Exception:
+                continue
+
+        return False
 
     async def check_access(self, message: types.Message) -> bool:
         """Проверяет доступ и отправляет сообщение если доступ запрещен"""
-        if not await self.is_user_member(message.from_user.id):
+        if not await self.is_user_member_of_any_group(message.from_user.id):
+            groups_info = "\n".join([f"• <code>{group_id}</code>" for group_id in self.allowed_group_ids])
+
             await message.answer(
                 "❌ <b>Доступ запрещен</b>\n\n"
-                "Этот бот доступен только для участников группы Cascate Cloud.\n"
-                "Пожалуйста, вступите в группу чтобы использовать бота.",
+                "Этот бот доступен только для участников разрешенных групп.\n"
+                "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
                 parse_mode=ParseMode.HTML
             )
             return False
         return True
 
     async def start(self, message: types.Message):
-        """Обработчик команды /start"""
-        # Проверяем доступ
+        """Обработчик команды /start (только в ЛС)"""
         if not await self.check_access(message):
             return
 
@@ -84,12 +95,13 @@ class SearchBot:
 <code>/search Распашные двери</code>
 <code>Распашные двери ALTA</code>
 <code>инструкция установки</code>
+
+💡 <i>Бот работает только в личных сообщениях</i>
         """
         await message.answer(welcome_text, parse_mode=ParseMode.HTML)
 
     async def search_command(self, message: types.Message, state: FSMContext):
-        """Обработчик команды /search"""
-        # Проверяем доступ
+        """Обработчик команды /search (только в ЛС)"""
         if not await self.check_access(message):
             return
 
@@ -103,8 +115,7 @@ class SearchBot:
         await self.perform_search(message, query, state)
 
     async def handle_message(self, message: types.Message, state: FSMContext):
-        """Обработчик обычных сообщений (быстрый поиск)"""
-        # Проверяем доступ
+        """Обработчик обычных сообщений (только в ЛС)"""
         if not await self.check_access(message):
             return
 
@@ -115,25 +126,43 @@ class SearchBot:
 
         await self.perform_search(message, query, state)
 
+    def split_message(self, text, max_length=4000):
+        """Разбивает длинное сообщение на части"""
+        if len(text) <= max_length:
+            return [text]
+
+        parts = []
+        while text:
+            if len(text) <= max_length:
+                parts.append(text)
+                break
+
+            split_pos = text.rfind('\n', 0, max_length)
+            if split_pos == -1:
+                split_pos = text.rfind(' ', 0, max_length)
+            if split_pos == -1:
+                split_pos = max_length
+
+            parts.append(text[:split_pos])
+            text = text[split_pos:].lstrip()
+
+        return parts
+
     async def delete_messages_batch(self, chat_id, message_ids):
         """Быстрое удаление сообщений пачками"""
         if not message_ids:
             return
 
-        # Создаем задачи для асинхронного удаления
         delete_tasks = []
         for msg_id in message_ids:
             try:
-                # Создаем задачу удаления, но не ждем ее выполнения сразу
                 task = asyncio.create_task(
                     self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 )
                 delete_tasks.append(task)
-            except Exception as e:
-                print(f"Error creating delete task for message {msg_id}: {e}")
+            except Exception:
                 continue
 
-        # Ждем завершения всех задач удаления с таймаутом
         if delete_tasks:
             try:
                 await asyncio.wait_for(
@@ -141,9 +170,9 @@ class SearchBot:
                     timeout=5.0
                 )
             except asyncio.TimeoutError:
-                print("Timeout while deleting messages batch")
-            except Exception as e:
-                print(f"Error in batch delete: {e}")
+                pass
+            except Exception:
+                pass
 
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
         """Отправляет одну страницу результатов (10 файлов)"""
@@ -155,23 +184,19 @@ class SearchBot:
         total_files = len(all_results)
         total_pages = (total_files + page_size - 1) // page_size
 
-        # Сохраняем все результаты и текущую страницу в состояние
         await state.update_data(
             last_results=all_results,
             current_page=page,
             current_query=query
         )
 
-        # Если есть предыдущие сообщения - удаляем их асинхронно
         if previous_messages:
-            # Запускаем удаление в фоне, не ждем завершения
             asyncio.create_task(
                 self.delete_messages_batch(chat_id, previous_messages)
             )
 
         current_messages = []
 
-        # Отправляем заголовок для первой страницы
         if page == 0:
             header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
             header_msg = await self.bot.send_message(
@@ -181,7 +206,6 @@ class SearchBot:
             )
             current_messages.append(header_msg.message_id)
         else:
-            # Для последующих страниц показываем заголовок с номером страницы
             header_text = f"📄 <b>Страница {page + 1}</b> | Найдено <b>{total_files}</b> файлов\n"
             header_msg = await self.bot.send_message(
                 chat_id=chat_id,
@@ -190,10 +214,8 @@ class SearchBot:
             )
             current_messages.append(header_msg.message_id)
 
-        # Быстро отправляем все файлы на странице
         send_tasks = []
         for i, result in enumerate(page_results, start=start_idx + 1):
-            # Формируем текст для файла
             name = html.escape(result['name'])
             path = html.escape(result['path'])
             size = html.escape(result['size_formatted'])
@@ -205,14 +227,12 @@ class SearchBot:
 📁 <i>Путь:</i> {path}
             """
 
-            # Создаем кнопку для этого файла
             builder = InlineKeyboardBuilder()
             builder.row(InlineKeyboardButton(
                 text="📋 Получить ссылки на файл",
-                callback_data=f"file_{i - 1}"  # Индекс в массиве результатов
+                callback_data=f"file_{i - 1}"
             ))
 
-            # Создаем задачу отправки сообщения
             task = asyncio.create_task(
                 self.bot.send_message(
                     chat_id=chat_id,
@@ -224,27 +244,23 @@ class SearchBot:
             )
             send_tasks.append((task, i))
 
-        # Ждем завершения отправки всех сообщений и собираем их ID
         for task, file_num in send_tasks:
             try:
                 file_msg = await task
                 current_messages.append(file_msg.message_id)
-            except Exception as e:
-                print(f"Error sending file message {file_num}: {e}")
+            except Exception:
+                pass
 
-        # Добавляем кнопку навигации
         nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
 
         nav_builder = InlineKeyboardBuilder()
 
-        # Если есть еще файлы, добавляем кнопку "Показать еще"
         if end_idx < total_files:
             nav_builder.row(InlineKeyboardButton(
                 text="➡️ Показать еще",
                 callback_data=f"more_{page + 1}"
             ))
 
-        # Всегда добавляем кнопку "В начало" кроме первой страницы
         if page > 0:
             nav_builder.row(InlineKeyboardButton(
                 text="⬅️ Назад",
@@ -259,9 +275,7 @@ class SearchBot:
         )
         current_messages.append(nav_msg.message_id)
 
-        # Сохраняем ID текущих сообщений для возможности удаления
         await state.update_data(current_messages=current_messages)
-
         return current_messages
 
     async def send_long_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=True):
@@ -286,7 +300,6 @@ class SearchBot:
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
         try:
-            # Показываем что бот работает
             search_message = await message.answer(f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                                                   parse_mode=ParseMode.HTML)
 
@@ -305,7 +318,6 @@ class SearchBot:
                 return
             except Exception as e:
                 await search_message.edit_text("❌ Ошибка подключения к серверу.")
-                print(f"API connection error: {e}")
                 return
 
             if data['results_count'] == 0:
@@ -313,10 +325,8 @@ class SearchBot:
                                                parse_mode=ParseMode.HTML)
                 return
 
-            # Удаляем сообщение "Ищу..."
             await search_message.delete()
 
-            # Отправляем первую страницу результатов
             await self.send_results_page(
                 chat_id=message.chat.id,
                 all_results=data['results'],
@@ -327,10 +337,13 @@ class SearchBot:
 
         except Exception as e:
             await message.answer("❌ Произошла ошибка при поиске.")
-            print(f"Bot error: {e}")
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки файлов"""
+        if not await self.is_user_member_of_any_group(callback_query.from_user.id):
+            await callback_query.answer("❌ Доступ запрещен. Вступите в одну из разрешенных групп.", show_alert=True)
+            return
+
         try:
             file_index = int(callback_query.data.split('_')[1])
 
@@ -364,7 +377,6 @@ class SearchBot:
                         url=file_info['download_link']
                     ))
 
-                # Редактируем исходное сообщение с файлом, добавляя ссылки
                 await callback_query.message.edit_text(
                     file_text,
                     parse_mode=ParseMode.HTML,
@@ -376,10 +388,13 @@ class SearchBot:
 
         except Exception as e:
             await callback_query.answer("❌ Ошибка при получении информации о файле")
-            print(f"Callback error: {e}")
 
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопки навигации"""
+        if not await self.is_user_member_of_any_group(callback_query.from_user.id):
+            await callback_query.answer("❌ Доступ запрещен. Вступите в одну из разрешенных групп.", show_alert=True)
+            return
+
         try:
             page = int(callback_query.data.split('_')[1])
 
@@ -392,10 +407,8 @@ class SearchBot:
                 await callback_query.answer("❌ Результаты поиска устарели")
                 return
 
-            # Показываем что загружаем следующую страницу
             await callback_query.answer("⏳ Загружаем...")
 
-            # Отправляем следующую страницу, удаляя предыдущие сообщения
             await self.send_results_page(
                 chat_id=callback_query.message.chat.id,
                 all_results=results,
@@ -407,7 +420,19 @@ class SearchBot:
 
         except Exception as e:
             await callback_query.answer("❌ Ошибка при загрузке файлов")
-            print(f"More callback error: {e}")
+
+    async def get_session(self):
+        """Создает aiohttp сессию при необходимости"""
+        if self.session is None:
+            timeout = aiohttp.ClientTimeout(total=60)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+        return self.session
+
+    async def close_session(self):
+        """Закрывает aiohttp сессию"""
+        if self.session:
+            await self.session.close()
+            self.session = None
 
     async def run(self):
         """Запускает бота"""
@@ -415,5 +440,4 @@ class SearchBot:
         try:
             await self.dp.start_polling(self.bot)
         finally:
-            # Закрываем сессию при остановке бота
             await self.close_session()
