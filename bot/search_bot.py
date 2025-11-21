@@ -435,9 +435,26 @@ class SearchBot:
             self.session = None
 
     async def run(self):
-        """Запускает бота"""
-        print("🤖 Бот запущен...")
+        """Запускает бота с улучшенной обработкой ошибок"""
+        print("🤖 Бот запускается...")
+
+        # Закрываем возможные старые сессии
+        await self.close_session()
+
         try:
-            await self.dp.start_polling(self.bot)
+            # Проверяем подключение к Telegram API
+            me = await self.bot.get_me()
+            print(f"✅ Бот @{me.username} успешно подключен")
+
+            # Запускаем polling с обработкой конфликтов
+            await self.dp.start_polling(
+                self.bot,
+                allowed_updates=["message", "callback_query"],
+                skip_updates=True  # Пропускаем старые updates при запуске
+            )
+        except Exception as e:
+            print(f"❌ Ошибка запуска бота: {e}")
+            # Ждем перед повторной попыткой
+            await asyncio.sleep(5)
         finally:
             await self.close_session()
