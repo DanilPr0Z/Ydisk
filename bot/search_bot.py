@@ -5,8 +5,14 @@ import asyncio
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.enums import ParseMode, ChatType
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -44,16 +50,67 @@ class SearchBot:
         # Регистрируем обработчики ТОЛЬКО для приватных чатов
         self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
         self.router.message.register(self.search_command, Command("search"), F.chat.type == ChatType.PRIVATE)
-        self.router.message.register(self.handle_message, F.text, F.chat.type == ChatType.PRIVATE)
+        self.router.message.register(self.help_command, Command("help"), F.chat.type == ChatType.PRIVATE)
+
+        # Обработчик Reply-кнопок ДО обычных сообщений
+        self.router.message.register(self.handle_reply_buttons, F.chat.type == ChatType.PRIVATE)
+
+        # Обработчик обычных сообщений (поиск) - должен быть ПОСЛЕДНИМ
+        self.router.message.register(self.handle_search_query, F.chat.type == ChatType.PRIVATE)
 
         # Callback обработчики
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
+    def get_main_menu_keyboard(self):
+        """Создает Reply-клавиатуру для главного меню"""
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔍 Начать поиск")],
+                [KeyboardButton(text="❓ Помощь"), KeyboardButton(text="ℹ️ О боте")]
+            ],
+            resize_keyboard=True,
+            input_field_placeholder="Выберите действие или введите запрос..."
+        )
+        return keyboard
+
+    def get_search_keyboard(self):
+        """Создает Reply-клавиатуру для поиска"""
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🏠 Главное меню")],
+                [KeyboardButton(text="❓ Помощь")]
+            ],
+            resize_keyboard=True,
+            input_field_placeholder="Введите поисковый запрос..."
+        )
+        return keyboard
+
+    def get_help_keyboard(self):
+        """Создает Reply-клавиатуру для помощи"""
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔍 Начать поиск")],
+                [KeyboardButton(text="🏠 Главное меню")]
+            ],
+            resize_keyboard=True,
+            input_field_placeholder="Выберите действие..."
+        )
+        return keyboard
+
+    async def setup_bot_commands(self):
+        """Устанавливает команды бота в меню"""
+        commands = [
+            types.BotCommand(command="/start", description="Запустить бота"),
+            types.BotCommand(command="/search", description="Поиск файлов"),
+            types.BotCommand(command="/help", description="Помощь"),
+        ]
+        await self.bot.set_my_commands(commands)
+
     async def is_user_member_of_any_group(self, user_id: int) -> bool:
         """Проверяет, является ли пользователь участником любой из разрешенных групп"""
         if not self.allowed_group_ids:
-            return False
+            return True  # Если группы не указаны, доступ разрешен всем
 
         for group_id in self.allowed_group_ids:
             try:
@@ -68,13 +125,12 @@ class SearchBot:
     async def check_access(self, message: types.Message) -> bool:
         """Проверяет доступ и отправляет сообщение если доступ запрещен"""
         if not await self.is_user_member_of_any_group(message.from_user.id):
-            groups_info = "\n".join([f"• <code>{group_id}</code>" for group_id in self.allowed_group_ids])
-
             await message.answer(
                 "❌ <b>Доступ запрещен</b>\n\n"
                 "Этот бот доступен только для участников разрешенных групп.\n"
                 "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
+                reply_markup=ReplyKeyboardRemove()
             )
             return False
         return True
@@ -98,7 +154,109 @@ class SearchBot:
 
 💡 <i>Бот работает только в личных сообщениях</i>
         """
-        await message.answer(welcome_text, parse_mode=ParseMode.HTML)
+
+        await message.answer(
+            welcome_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self.get_main_menu_keyboard()
+        )
+
+    async def help_command(self, message: types.Message):
+        """Обработчик команды /help"""
+        if not await self.check_access(message):
+            return
+
+        help_text = """
+<b>📖 Помощь по использованию бота</b>
+
+<b>Основные команды:</b>
+• <code>/start</code> - запустить бота
+• <code>/search &lt;запрос&gt;</code> - поиск файлов
+• <code>/help</code> - эта справка
+
+<b>Быстрый поиск:</b>
+Просто отправьте любой текст - бот выполнит поиск автоматически.
+
+<b>Примеры запросов:</b>
+<code>двери ALTA PRO</code>
+<code>инструкция по установке</code>
+<code>чертежи фасадов</code>
+
+<b>Навигация:</b>
+• Используйте кнопки "Показать еще" для просмотра всех результатов
+• Нажмите на номер файла для получения ссылок
+        """
+
+        await message.answer(
+            help_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self.get_help_keyboard()
+        )
+
+    async def handle_reply_buttons(self, message: types.Message):
+        """Обработчик Reply-кнопок"""
+        if not await self.check_access(message):
+            return
+
+        text = message.text
+
+        if text == "🔍 Начать поиск":
+            search_help_text = """
+🔍 <b>Режим поиска</b>
+
+Введите поисковый запрос для поиска файлов:
+
+<b>Примеры:</b>
+<code>двери ALTA PRO</code>
+<code>инструкция по установке</code>
+<code>чертежи фасадов</code>
+
+💡 <i>Просто введите запрос и нажмите отправить</i>
+            """
+
+            await message.answer(
+                search_help_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_search_keyboard()
+            )
+
+        elif text == "🏠 Главное меню":
+            welcome_text = """
+🏠 <b>Главное меню</b>
+
+Выберите действие:
+            """
+
+            await message.answer(
+                welcome_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_main_menu_keyboard()
+            )
+
+        elif text == "❓ Помощь":
+            await self.help_command(message)
+
+        elif text == "ℹ️ О боте":
+            about_text = """
+🤖 <b>Cascate Cloud Search Bot</b>
+
+<b>О боте:</b>
+Этот бот помогает искать файлы в облачном хранилище Cascate Cloud.
+
+<b>Возможности:</b>
+• 🔍 Быстрый поиск по названиям файлов
+• 📁 Просмотр структуры каталогов  
+• 🌐 Прямые ссылки на Яндекс.Диск
+• 📥 Возможность скачивания файлов
+
+💡 <i>Для начала работы нажмите "Начать поиск"</i>
+            """
+
+            await message.answer(
+                about_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_main_menu_keyboard()
+            )
 
     async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search (только в ЛС)"""
@@ -108,22 +266,41 @@ class SearchBot:
         query = message.text.replace('/search', '').strip()
 
         if not query:
-            await message.answer("❌ Укажите поисковый запрос после команды\nПример: <code>/search инструкция</code>",
-                                 parse_mode=ParseMode.HTML)
+            # Показываем подсказку по поиску
+            search_help_text = """
+🔍 <b>Поиск файлов</b>
+
+Используйте команду:
+<code>/search запрос</code>
+
+<b>Пример:</b>
+<code>/search двери ALTA PRO</code>
+
+Или просто введите запрос без команды.
+            """
+
+            await message.answer(
+                search_help_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_search_keyboard()
+            )
             return
 
         await self.perform_search(message, query, state)
 
-    async def handle_message(self, message: types.Message, state: FSMContext):
-        """Обработчик обычных сообщений (только в ЛС)"""
+    async def handle_search_query(self, message: types.Message, state: FSMContext):
+        """Обработчик обычных сообщений для поиска"""
         if not await self.check_access(message):
             return
 
         query = message.text.strip()
 
-        if query.startswith('/'):
+        # Пропускаем команды и кнопки меню (они уже обработаны выше)
+        if (query.startswith('/') or
+                query in ["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"]):
             return
 
+        # Если это обычный текст - выполняем поиск
         await self.perform_search(message, query, state)
 
     def split_message(self, text, max_length=4000):
@@ -275,33 +452,24 @@ class SearchBot:
         )
         current_messages.append(nav_msg.message_id)
 
+        # После показа результатов возвращаем меню поиска
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text="💡 <b>Что дальше?</b>\n\nВведите новый запрос для поиска или используйте кнопки меню:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=self.get_search_keyboard()
+        )
+
         await state.update_data(current_messages=current_messages)
         return current_messages
-
-    async def send_long_message(self, chat_id, text, reply_markup=None, disable_web_page_preview=True):
-        """Отправляет длинное сообщение частями"""
-        parts = self.split_message(text)
-
-        for i, part in enumerate(parts):
-            is_last_part = (i == len(parts) - 1)
-            current_markup = reply_markup if is_last_part else None
-
-            try:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=part,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=current_markup,
-                    disable_web_page_preview=disable_web_page_preview
-                )
-            except Exception as e:
-                print(f"Error sending message part {i}: {e}")
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
         try:
-            search_message = await message.answer(f"🔍 Ищу: <b>{html.escape(query)}</b>...",
-                                                  parse_mode=ParseMode.HTML)
+            search_message = await message.answer(
+                f"🔍 Ищу: <b>{html.escape(query)}</b>...",
+                parse_mode=ParseMode.HTML
+            )
 
             session = await self.get_session()
 
@@ -318,11 +486,14 @@ class SearchBot:
                 return
             except Exception as e:
                 await search_message.edit_text("❌ Ошибка подключения к серверу.")
+                print(f"API error: {e}")
                 return
 
             if data['results_count'] == 0:
-                await search_message.edit_text(f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено",
-                                               parse_mode=ParseMode.HTML)
+                await search_message.edit_text(
+                    f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено",
+                    parse_mode=ParseMode.HTML
+                )
                 return
 
             await search_message.delete()
@@ -336,6 +507,7 @@ class SearchBot:
             )
 
         except Exception as e:
+            print(f"Search error: {e}")
             await message.answer("❌ Произошла ошибка при поиске.")
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
@@ -355,9 +527,6 @@ class SearchBot:
 
                 name = html.escape(file_info['name'])
                 path = html.escape(file_info['path'])
-                size = html.escape(file_info['size_formatted'])
-                modified = html.escape(file_info['modified'][:10])
-                media_type = html.escape(file_info.get('media_type', 'Неизвестно'))
 
                 file_text = f"""
 📄 <b>{name}</b>
@@ -387,6 +556,7 @@ class SearchBot:
             await callback_query.answer()
 
         except Exception as e:
+            print(f"Callback error: {e}")
             await callback_query.answer("❌ Ошибка при получении информации о файле")
 
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
@@ -419,6 +589,7 @@ class SearchBot:
             )
 
         except Exception as e:
+            print(f"More callback error: {e}")
             await callback_query.answer("❌ Ошибка при загрузке файлов")
 
     async def get_session(self):
@@ -438,6 +609,9 @@ class SearchBot:
         """Запускает бота с улучшенной обработкой ошибок"""
         print("🤖 Бот запускается...")
 
+        # Устанавливаем команды меню
+        await self.setup_bot_commands()
+
         # Закрываем возможные старые сессии
         await self.close_session()
 
@@ -450,11 +624,9 @@ class SearchBot:
             await self.dp.start_polling(
                 self.bot,
                 allowed_updates=["message", "callback_query"],
-                skip_updates=True  # Пропускаем старые updates при запуске
+                skip_updates=True
             )
         except Exception as e:
             print(f"❌ Ошибка запуска бота: {e}")
-            # Ждем перед повторной попыткой
-            await asyncio.sleep(5)
         finally:
             await self.close_session()

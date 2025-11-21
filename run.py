@@ -2,6 +2,7 @@
 import os
 import sys
 import argparse
+import asyncio
 
 
 def main():
@@ -12,9 +13,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == 'all':
-        # Запускаем всё
+        # Запускаем всё через новый менеджер
         from run_all import main as run_all_main
-        import asyncio
         asyncio.run(run_all_main())
 
     elif args.command == 'web':
@@ -27,7 +27,6 @@ def main():
     elif args.command == 'bot':
         # Запускаем только бота
         from run_bot import main as run_bot_main
-        import asyncio
         asyncio.run(run_bot_main())
 
     elif args.command == 'migrate':
