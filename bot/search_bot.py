@@ -47,16 +47,24 @@ class SearchBot:
         # Создаем aiohttp сессию для асинхронных запросов
         self.session = None
 
-        # Регистрируем обработчики ТОЛЬКО для приватных чатов
+        # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
         self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
         self.router.message.register(self.search_command, Command("search"), F.chat.type == ChatType.PRIVATE)
         self.router.message.register(self.help_command, Command("help"), F.chat.type == ChatType.PRIVATE)
 
-        # Обработчик Reply-кнопок ДО обычных сообщений
-        self.router.message.register(self.handle_reply_buttons, F.chat.type == ChatType.PRIVATE)
+        # Обработчик Reply-кнопок с более строгим фильтром
+        self.router.message.register(
+            self.handle_reply_buttons,
+            F.chat.type == ChatType.PRIVATE,
+            F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
+        )
 
-        # Обработчик обычных сообщений (поиск) - должен быть ПОСЛЕДНИМ
-        self.router.message.register(self.handle_search_query, F.chat.type == ChatType.PRIVATE)
+        # Обработчик обычных сообщений для поиска - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
+        self.router.message.register(
+            self.handle_search_query,
+            F.chat.type == ChatType.PRIVATE,
+            F.text
+        )
 
         # Callback обработчики
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
@@ -295,12 +303,9 @@ class SearchBot:
 
         query = message.text.strip()
 
-        # Пропускаем команды и кнопки меню (они уже обработаны выше)
-        if (query.startswith('/') or
-                query in ["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"]):
-            return
+        print(f"🔍 Получен поисковый запрос: '{query}'")  # Debug
 
-        # Если это обычный текст - выполняем поиск
+        # Выполняем поиск
         await self.perform_search(message, query, state)
 
     def split_message(self, text, max_length=4000):
@@ -466,6 +471,8 @@ class SearchBot:
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
         """Выполняет поиск через API асинхронно"""
         try:
+            print(f"🔍 Начинаем поиск: '{query}'")  # Debug
+
             search_message = await message.answer(
                 f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                 parse_mode=ParseMode.HTML
@@ -474,22 +481,31 @@ class SearchBot:
             session = await self.get_session()
 
             try:
+                print(f"🌐 Отправляем запрос к API: {self.api_url}?q={query}")  # Debug
+
                 async with session.get(f"{self.api_url}?q={query}") as response:
+                    print(f"🌐 Получен ответ: {response.status}")  # Debug
+
                     if response.status != 200:
+                        error_text = await response.text()
+                        print(f"❌ Ошибка API: {response.status} - {error_text}")  # Debug
                         await search_message.edit_text("❌ Ошибка при поиске. Попробуйте позже.")
                         return
 
                     data = await response.json()
+                    print(f"📊 Получено результатов: {data.get('results_count', 0)}")  # Debug
 
             except asyncio.TimeoutError:
+                print("⏰ Таймаут при поиске")  # Debug
                 await search_message.edit_text("⏰ Таймаут при поиске. Сервер долго не отвечает.")
                 return
             except Exception as e:
+                print(f"❌ Ошибка подключения к серверу: {e}")  # Debug
                 await search_message.edit_text("❌ Ошибка подключения к серверу.")
-                print(f"API error: {e}")
                 return
 
-            if data['results_count'] == 0:
+            if data.get('results_count', 0) == 0:
+                print("❌ Ничего не найдено")  # Debug
                 await search_message.edit_text(
                     f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено",
                     parse_mode=ParseMode.HTML
@@ -507,7 +523,7 @@ class SearchBot:
             )
 
         except Exception as e:
-            print(f"Search error: {e}")
+            print(f"❌ Ошибка при поиске: {e}")  # Debug
             await message.answer("❌ Произошла ошибка при поиске.")
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
