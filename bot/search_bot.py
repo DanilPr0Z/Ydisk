@@ -59,6 +59,9 @@ class SearchBot:
         self.search_cache = {}
         self.cache_timeout = 300  # 5 минут
 
+        # Ограничитель скорости отправки сообщений
+        self.rate_limit_delay = 0.5  # Задержка между сообщениями в секундах
+
         # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
         self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
         self.router.message.register(self.search_command, Command("search"), F.chat.type == ChatType.PRIVATE)
@@ -341,8 +344,21 @@ class SearchBot:
         # Выполняем поиск
         await self.perform_search(message, query, state)
 
+    async def send_single_message(self, chat_id, text, **kwargs):
+        """Отправляет одно сообщение с обработкой ошибок и задержкой"""
+        try:
+            await asyncio.sleep(self.rate_limit_delay)  # Задержка между сообщениями
+            return await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        except TelegramRetryAfter as e:
+            logger.warning(f"⚠️ Rate limit, waiting {e.retry_after}s")
+            await asyncio.sleep(e.retry_after)
+            return await self.send_single_message(chat_id, text, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+            return None
+
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
-        """Отправляет одну страницу результатов (10 файлов)"""
+        """Отправляет одну страницу результатов (10 файлов) с ограничением скорости"""
         try:
             page_size = 10
             start_idx = page * page_size
@@ -365,24 +381,22 @@ class SearchBot:
 
             current_messages = []
 
+            # Отправляем заголовок
             if page == 0:
                 header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
-                header_msg = await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=header_text,
-                    parse_mode=ParseMode.HTML
-                )
-                current_messages.append(header_msg.message_id)
             else:
                 header_text = f"📄 <b>Страница {page + 1}</b> | Найдено <b>{total_files}</b> файлов\n"
-                header_msg = await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=header_text,
-                    parse_mode=ParseMode.HTML
-                )
+
+            header_msg = await self.send_single_message(
+                chat_id=chat_id,
+                text=header_text,
+                parse_mode=ParseMode.HTML
+            )
+            if header_msg:
                 current_messages.append(header_msg.message_id)
 
-            send_tasks = []
+            # Отправляем файлы по одному с задержкой
+            sent_files = 0
             for i, result in enumerate(page_results, start=start_idx + 1):
                 name = html.escape(result['name'])
                 path = html.escape(result['path'])
@@ -399,25 +413,25 @@ class SearchBot:
                     callback_data=f"file_{i - 1}"
                 ))
 
-                task = asyncio.create_task(
-                    self.bot.send_message(
-                        chat_id=chat_id,
-                        text=file_text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=builder.as_markup(),
-                        disable_web_page_preview=True
-                    )
+                file_msg = await self.send_single_message(
+                    chat_id=chat_id,
+                    text=file_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=builder.as_markup(),
+                    disable_web_page_preview=True
                 )
-                send_tasks.append((task, i))
 
-            for task, file_num in send_tasks:
-                try:
-                    file_msg = await task
+                if file_msg:
                     current_messages.append(file_msg.message_id)
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке файла {file_num}: {e}")
-                    continue
+                    sent_files += 1
+                else:
+                    logger.warning(f"⚠️ Не удалось отправить файл {i}")
 
+                # Если отправлено 5 файлов, делаем дополнительную паузу
+                if sent_files % 5 == 0:
+                    await asyncio.sleep(1)
+
+            # Отправляем навигацию
             nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
 
             nav_builder = InlineKeyboardBuilder()
@@ -434,22 +448,24 @@ class SearchBot:
                     callback_data=f"more_{page - 1}"
                 ))
 
-            nav_msg = await self.bot.send_message(
+            nav_msg = await self.send_single_message(
                 chat_id=chat_id,
                 text=nav_text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=nav_builder.as_markup() if nav_builder.buttons else None
             )
-            current_messages.append(nav_msg.message_id)
+            if nav_msg:
+                current_messages.append(nav_msg.message_id)
 
             # После показа результатов возвращаем меню поиска
-            menu_msg = await self.bot.send_message(
+            menu_msg = await self.send_single_message(
                 chat_id=chat_id,
                 text="💡 <b>Что дальше?</b>\n\nВведите новый запрос для поиска или используйте кнопки меню:",
                 parse_mode=ParseMode.HTML,
                 reply_markup=self.get_search_keyboard()
             )
-            current_messages.append(menu_msg.message_id)
+            if menu_msg:
+                current_messages.append(menu_msg.message_id)
 
             await state.update_data(current_messages=current_messages)
             return current_messages
@@ -553,8 +569,9 @@ class SearchBot:
             logger.info(f"🔍 Начинаем поиск: '{query}'")
 
             # Отправляем сообщение о начале поиска
-            progress_msg = await message.answer(
-                f"🔍 Ищу: <b>{html.escape(query)}</b>...",
+            progress_msg = await self.send_single_message(
+                chat_id=message.chat.id,
+                text=f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                 parse_mode=ParseMode.HTML
             )
 
@@ -565,17 +582,19 @@ class SearchBot:
             logger.info(f"✅ Поиск '{query}' выполнен за {execution_time:.2f}с, найдено: {data.get('results_count', 0)}")
 
             if data.get('results_count', 0) == 0:
-                await progress_msg.edit_text(
-                    f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено\n\n"
-                    f"💡 <i>Попробуйте:</i>\n"
-                    f"• Уточнить запрос\n"
-                    f"• Использовать другие ключевые слова\n"
-                    f"• Проверить орфографию",
-                    parse_mode=ParseMode.HTML
-                )
+                if progress_msg:
+                    await progress_msg.edit_text(
+                        f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено\n\n"
+                        f"💡 <i>Попробуйте:</i>\n"
+                        f"• Уточнить запрос\n"
+                        f"• Использовать другие ключевые слова\n"
+                        f"• Проверить орфографию",
+                        parse_mode=ParseMode.HTML
+                    )
                 return
 
-            await progress_msg.delete()
+            if progress_msg:
+                await progress_msg.delete()
 
             await self.send_results_page(
                 chat_id=message.chat.id,
@@ -744,3 +763,4 @@ class SearchBot:
             logger.error(f"❌ Ошибка запуска бота: {e}")
         finally:
             await self.close_session()
+
