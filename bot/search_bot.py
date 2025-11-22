@@ -67,21 +67,21 @@ class SearchBot:
 
     def register_handlers(self):
         """Регистрирует все обработчики в правильном порядке"""
-        # Сначала обработчики команд с явными фильтрами
+        # Обработчики команд
         self.router.message.register(self.start, Command("start"))
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.help_command, Command("help"))
 
-        # Затем обработчик Reply-кнопок
+        # Обработчик Reply-кнопок
         self.router.message.register(
             self.handle_reply_buttons,
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
-        # ВСЕ остальные текстовые сообщения - поиск
+        # Обработчик обычных сообщений для поиска - ТОЛЬКО если это не команда и не кнопка
         self.router.message.register(
             self.handle_search_query,
-            F.text
+            F.text & ~F.text.startswith('/')
         )
 
         # Callback обработчики
@@ -90,10 +90,6 @@ class SearchBot:
 
     async def start(self, message: types.Message):
         """Обработчик команды /start"""
-        # Добавляем проверку на дублирующиеся сообщения
-        if hasattr(message, 'processed') and message.processed:
-            return
-
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
 
         if not await self.require_access(message):
@@ -120,16 +116,11 @@ class SearchBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self.get_main_menu_keyboard()
             )
-            # Помечаем сообщение как обработанное
-            message.processed = True
         except Exception as e:
             logger.error(f"Ошибка при отправке стартового сообщения: {e}")
 
     async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
-        if hasattr(message, 'processed') and message.processed:
-            return
-
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
 
         if not await self.require_access(message):
@@ -156,19 +147,14 @@ class SearchBot:
                     parse_mode=ParseMode.HTML,
                     reply_markup=self.get_search_keyboard()
                 )
-                message.processed = True
             except Exception as e:
                 logger.error(f"Ошибка при отправке подсказки поиска: {e}")
             return
 
         await self.perform_search(message, query, state)
-        message.processed = True
 
     async def help_command(self, message: types.Message):
         """Обработчик команды /help"""
-        if hasattr(message, 'processed') and message.processed:
-            return
-
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
 
         if not await self.require_access(message):
@@ -202,15 +188,11 @@ class SearchBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=self.get_help_keyboard()
             )
-            message.processed = True
         except Exception as e:
             logger.error(f"Ошибка при отправке справки: {e}")
 
     async def handle_reply_buttons(self, message: types.Message):
         """Обработчик Reply-кнопок"""
-        if hasattr(message, 'processed') and message.processed:
-            return
-
         logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
 
         if not await self.require_access(message):
@@ -276,20 +258,11 @@ class SearchBot:
                     parse_mode=ParseMode.HTML,
                     reply_markup=self.get_main_menu_keyboard()
                 )
-            message.processed = True
         except Exception as e:
             logger.error(f"Ошибка при обработке reply-кнопки: {e}")
 
     async def handle_search_query(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений для поиска"""
-        # Пропускаем если сообщение уже обработано другими обработчиками
-        if hasattr(message, 'processed') and message.processed:
-            return
-
-        # Пропускаем команды
-        if message.text.startswith('/'):
-            return
-
         logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
 
         if not await self.require_access(message):
@@ -303,7 +276,6 @@ class SearchBot:
             logger.error(f"Ошибка отправки действия: {e}")
 
         await self.perform_search(message, query, state)
-        message.processed = True
 
     # Остальные методы остаются без изменений...
     def get_main_menu_keyboard(self):
@@ -666,7 +638,6 @@ class SearchBot:
 
             if not has_access:
                 await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-                # НЕ отправляем сообщение "Доступ запрещен" в чат, только alert
                 return
 
             file_index = int(callback_query.data.split('_')[1])
@@ -717,7 +688,6 @@ class SearchBot:
 
             if not has_access:
                 await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-                # НЕ отправляем сообщение "Доступ запрещен" в чат, только alert
                 return
 
             page = int(callback_query.data.split('_')[1])
