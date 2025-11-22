@@ -137,38 +137,28 @@ class SearchBot:
         """Проверка доступа пользователя ко всем разрешенным группам (без кэширования)"""
         # Если группы не указаны, доступ разрешен всем
         if not self.allowed_group_ids:
-            logger.info(f"✅ Группы не указаны, доступ разрешен для {user_id}")
             return True
 
         logger.info(f"🔹 Проверка доступа для пользователя {user_id}")
-        logger.info(f"🔹 Разрешенные группы: {self.allowed_group_ids}")
 
         # Проверяем все группы из списка (без кэширования)
         has_access = False
-        accessible_group = None
 
         for group_id in self.allowed_group_ids:
             try:
-                logger.info(f"🔍 Проверяем группу {group_id} для пользователя {user_id}")
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
-                logger.info(f"📊 Статус пользователя {user_id} в группе {group_id}: {member.status}")
 
                 if member.status in ['member', 'administrator', 'creator']:
                     has_access = True
-                    accessible_group = group_id
                     logger.info(f"✅ Пользователь {user_id} имеет доступ через группу {group_id}")
                     break  # Достаточно быть участником одной группы
-                else:
-                    logger.info(f"❌ Пользователь {user_id} не участник группы {group_id}, статус: {member.status}")
 
             except Exception as e:
-                logger.error(f"🚫 Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
+                logger.warning(f"⚠️ Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
                 continue  # Продолжаем проверять другие группы
 
-        if has_access:
-            logger.info(f"🎉 ПОЛЬЗОВАТЕЛЬ {user_id} ИМЕЕТ ДОСТУП (группа: {accessible_group})")
-        else:
-            logger.info(f"🔒 ПОЛЬЗОВАТЕЛЬ {user_id} НЕ ИМЕЕТ ДОСТУП НИ К ОДНОЙ ГРУППЕ")
+        if not has_access:
+            logger.info(f"🔒 Пользователь {user_id} не имеет доступа ни к одной группе")
 
         return has_access
 
@@ -637,11 +627,19 @@ class SearchBot:
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки файлов"""
-        if not await self.check_user_access(callback_query.from_user.id):
-            await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-            return
-
         try:
+            # Проверяем доступ с обработкой ошибок
+            try:
+                has_access = await self.check_user_access(callback_query.from_user.id)
+            except Exception as e:
+                logger.error(f"Ошибка при проверке доступа в callback: {e}")
+                has_access = False
+
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                # НЕ отправляем сообщение "Доступ запрещен" в чат, только alert
+                return
+
             file_index = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -676,15 +674,23 @@ class SearchBot:
 
         except Exception as e:
             logger.error(f"Callback error: {e}")
-            await callback_query.answer("❌ Ошибка")
+            await callback_query.answer("❌ Ошибка при обработке запроса")
 
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопки навигации"""
-        if not await self.check_user_access(callback_query.from_user.id):
-            await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-            return
-
         try:
+            # Проверяем доступ с обработкой ошибок
+            try:
+                has_access = await self.check_user_access(callback_query.from_user.id)
+            except Exception as e:
+                logger.error(f"Ошибка при проверке доступа в more_callback: {e}")
+                has_access = False
+
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                # НЕ отправляем сообщение "Доступ запрещен" в чат, только alert
+                return
+
             page = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
