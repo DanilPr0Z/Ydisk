@@ -66,28 +66,246 @@ class SearchBot:
         self.register_handlers()
 
     def register_handlers(self):
-        """Регистрирует все обработчики"""
-        # Обработчики команд - ВЫСОКИЙ ПРИОРИТЕТ
+        """Регистрирует все обработчики в правильном порядке"""
+        # Сначала обработчики команд с явными фильтрами
         self.router.message.register(self.start, Command("start"))
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.help_command, Command("help"))
 
-        # Обработчик Reply-кнопок - ВЫСОКИЙ ПРИОРИТЕТ
+        # Затем обработчик Reply-кнопок
         self.router.message.register(
             self.handle_reply_buttons,
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
-        # Обработчик обычных сообщений для поиска - НИЗКИЙ ПРИОРИТЕТ
+        # ВСЕ остальные текстовые сообщения - поиск
         self.router.message.register(
             self.handle_search_query,
-            F.text & ~F.text.startswith('/')
+            F.text
         )
 
         # Callback обработчики
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
+    async def start(self, message: types.Message):
+        """Обработчик команды /start"""
+        # Добавляем проверку на дублирующиеся сообщения
+        if hasattr(message, 'processed') and message.processed:
+            return
+
+        logger.info(f"🔹 /start от пользователя {message.from_user.id}")
+
+        if not await self.require_access(message):
+            return
+
+        welcome_text = """
+🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
+
+<b>Доступные команды:</b>
+/search &lt;запрос&gt; - поиск файлов
+&lt;текст&gt; - быстрый поиск по тексту
+
+<b>Примеры:</b>
+<code>/search Распашные двери</code>
+<code>Распашные двери ALTA</code>
+<code>инструкция установки</code>
+
+💡 <i>Бот работает только в личных сообщениях</i>
+        """
+
+        try:
+            await message.answer(
+                welcome_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_main_menu_keyboard()
+            )
+            # Помечаем сообщение как обработанное
+            message.processed = True
+        except Exception as e:
+            logger.error(f"Ошибка при отправке стартового сообщения: {e}")
+
+    async def search_command(self, message: types.Message, state: FSMContext):
+        """Обработчик команды /search"""
+        if hasattr(message, 'processed') and message.processed:
+            return
+
+        logger.info(f"🔹 /search от пользователя {message.from_user.id}")
+
+        if not await self.require_access(message):
+            return
+
+        query = message.text.replace('/search', '').strip()
+
+        if not query:
+            search_help_text = """
+🔍 <b>Поиск файлов</b>
+
+Используйте команду:
+<code>/search запрос</code>
+
+<b>Пример:</b>
+<code>/search двери ALTA PRO</code>
+
+Или просто введите запрос без команды.
+            """
+
+            try:
+                await message.answer(
+                    search_help_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.get_search_keyboard()
+                )
+                message.processed = True
+            except Exception as e:
+                logger.error(f"Ошибка при отправке подсказки поиска: {e}")
+            return
+
+        await self.perform_search(message, query, state)
+        message.processed = True
+
+    async def help_command(self, message: types.Message):
+        """Обработчик команды /help"""
+        if hasattr(message, 'processed') and message.processed:
+            return
+
+        logger.info(f"🔹 /help от пользователя {message.from_user.id}")
+
+        if not await self.require_access(message):
+            return
+
+        help_text = """
+<b>📖 Помощь по использованию бота</b>
+
+<b>Основные команды:</b>
+• <code>/start</code> - запустить бота
+• <code>/search &lt;запрос&gt;</code> - поиск файлов
+• <code>/help</code> - эта справка
+
+<b>Быстрый поиск:</b>
+Просто отправьте любой текст - бот выполнит поиск автоматически.
+
+<b>Примеры запросов:</b>
+<code>двери ALTA PRO</code>
+<code>инструкция по установке</code>
+<code>чертежи фасадов</code>
+
+<b>Навигация:</b>
+• Используйте кнопки "Показать еще" для просмотра всех результатов
+• Нажмите на номер файла для получения ссылок
+• Содержание https://disk.yandex.ru/i/3je4lFfG5VxFzw
+        """
+
+        try:
+            await message.answer(
+                help_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self.get_help_keyboard()
+            )
+            message.processed = True
+        except Exception as e:
+            logger.error(f"Ошибка при отправке справки: {e}")
+
+    async def handle_reply_buttons(self, message: types.Message):
+        """Обработчик Reply-кнопок"""
+        if hasattr(message, 'processed') and message.processed:
+            return
+
+        logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
+
+        if not await self.require_access(message):
+            return
+
+        text = message.text
+
+        try:
+            if text == "🔍 Начать поиск":
+                search_help_text = """
+🔍 <b>Режим поиска</b>
+
+Введите поисковый запрос для поиска файлов:
+
+<b>Примеры:</b>
+<code>двери ALTA PRO</code>
+<code>инструкция по установке</code>
+<code>чертежи фасадов</code>
+
+💡 <i>Просто введите запрос и нажмите отправить</i>
+                """
+
+                await message.answer(
+                    search_help_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.get_search_keyboard()
+                )
+
+            elif text == "🏠 Главное меню":
+                welcome_text = """
+🏠 <b>Главное меню</b>
+
+Выберите действие:
+                """
+
+                await message.answer(
+                    welcome_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.get_main_menu_keyboard()
+                )
+
+            elif text == "❓ Помощь":
+                await self.help_command(message)
+
+            elif text == "ℹ️ О боте":
+                about_text = """
+🤖 <b>Cascate Cloud Search Bot</b>
+
+<b>О боте:</b>
+Этот бот помогает искать файлы в облачном хранилище Cascate Cloud.
+
+<b>Возможности:</b>
+• 🔍 Быстрый поиск по названиям файлов
+• 📁 Просмотр структуры каталогов  
+• 🌐 Прямые ссылки на Яндекс.Диск
+• 📥 Возможность скачивания файлов
+
+💡 <i>Для начала работы нажмите "Начать поиск"</i>
+                """
+
+                await message.answer(
+                    about_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.get_main_menu_keyboard()
+                )
+            message.processed = True
+        except Exception as e:
+            logger.error(f"Ошибка при обработке reply-кнопки: {e}")
+
+    async def handle_search_query(self, message: types.Message, state: FSMContext):
+        """Обработчик обычных сообщений для поиска"""
+        # Пропускаем если сообщение уже обработано другими обработчиками
+        if hasattr(message, 'processed') and message.processed:
+            return
+
+        # Пропускаем команды
+        if message.text.startswith('/'):
+            return
+
+        logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
+
+        if not await self.require_access(message):
+            return
+
+        query = message.text.strip()
+
+        try:
+            await self.bot.send_chat_action(message.chat.id, "typing")
+        except Exception as e:
+            logger.error(f"Ошибка отправки действия: {e}")
+
+        await self.perform_search(message, query, state)
+        message.processed = True
+
+    # Остальные методы остаются без изменений...
     def get_main_menu_keyboard(self):
         """Создает Reply-клавиатуру для главного меню"""
         keyboard = ReplyKeyboardMarkup(
@@ -185,195 +403,6 @@ class SearchBot:
             )
         except Exception as e:
             logger.error(f"Ошибка при отправке сообщения о доступе: {e}")
-
-    async def start(self, message: types.Message):
-        """Обработчик команды /start"""
-        logger.info(f"🔹 /start от пользователя {message.from_user.id}")
-
-        if not await self.require_access(message):
-            return
-
-        welcome_text = """
-🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
-
-<b>Доступные команды:</b>
-/search &lt;запрос&gt; - поиск файлов
-&lt;текст&gt; - быстрый поиск по тексту
-
-<b>Примеры:</b>
-<code>/search Распашные двери</code>
-<code>Распашные двери ALTA</code>
-<code>инструкция установки</code>
-
-💡 <i>Бот работает только в личных сообщениях</i>
-        """
-
-        try:
-            await message.answer(
-                welcome_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=self.get_main_menu_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при отправке стартового сообщения: {e}")
-
-    async def help_command(self, message: types.Message):
-        """Обработчик команды /help"""
-        logger.info(f"🔹 /help от пользователя {message.from_user.id}")
-
-        if not await self.require_access(message):
-            return
-
-        help_text = """
-<b>📖 Помощь по использованию бота</b>
-
-<b>Основные команды:</b>
-• <code>/start</code> - запустить бота
-• <code>/search &lt;запрос&gt;</code> - поиск файлов
-• <code>/help</code> - эта справка
-
-<b>Быстрый поиск:</b>
-Просто отправьте любой текст - бот выполнит поиск автоматически.
-
-<b>Примеры запросов:</b>
-<code>двери ALTA PRO</code>
-<code>инструкция по установке</code>
-<code>чертежи фасадов</code>
-
-<b>Навигация:</b>
-• Используйте кнопки "Показать еще" для просмотра всех результатов
-• Нажмите на номер файла для получения ссылок
-• Содержание https://disk.yandex.ru/i/3je4lFfG5VxFzw
-        """
-
-        try:
-            await message.answer(
-                help_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=self.get_help_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при отправке справки: {e}")
-
-    async def handle_reply_buttons(self, message: types.Message):
-        """Обработчик Reply-кнопок"""
-        logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
-
-        if not await self.require_access(message):
-            return
-
-        text = message.text
-
-        try:
-            if text == "🔍 Начать поиск":
-                search_help_text = """
-🔍 <b>Режим поиска</b>
-
-Введите поисковый запрос для поиска файлов:
-
-<b>Примеры:</b>
-<code>двери ALTA PRO</code>
-<code>инструкция по установке</code>
-<code>чертежи фасадов</code>
-
-💡 <i>Просто введите запрос и нажмите отправить</i>
-                """
-
-                await message.answer(
-                    search_help_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_search_keyboard()
-                )
-
-            elif text == "🏠 Главное меню":
-                welcome_text = """
-🏠 <b>Главное меню</b>
-
-Выберите действие:
-                """
-
-                await message.answer(
-                    welcome_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_main_menu_keyboard()
-                )
-
-            elif text == "❓ Помощь":
-                await self.help_command(message)
-
-            elif text == "ℹ️ О боте":
-                about_text = """
-🤖 <b>Cascate Cloud Search Bot</b>
-
-<b>О боте:</b>
-Этот бот помогает искать файлы в облачном хранилище Cascate Cloud.
-
-<b>Возможности:</b>
-• 🔍 Быстрый поиск по названиям файлов
-• 📁 Просмотр структуры каталогов  
-• 🌐 Прямые ссылки на Яндекс.Диск
-• 📥 Возможность скачивания файлов
-
-💡 <i>Для начала работы нажмите "Начать поиск"</i>
-                """
-
-                await message.answer(
-                    about_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_main_menu_keyboard()
-                )
-        except Exception as e:
-            logger.error(f"Ошибка при обработке reply-кнопки: {e}")
-
-    async def search_command(self, message: types.Message, state: FSMContext):
-        """Обработчик команды /search"""
-        logger.info(f"🔹 /search от пользователя {message.from_user.id}")
-
-        if not await self.require_access(message):
-            return
-
-        query = message.text.replace('/search', '').strip()
-
-        if not query:
-            search_help_text = """
-🔍 <b>Поиск файлов</b>
-
-Используйте команду:
-<code>/search запрос</code>
-
-<b>Пример:</b>
-<code>/search двери ALTA PRO</code>
-
-Или просто введите запрос без команды.
-            """
-
-            try:
-                await message.answer(
-                    search_help_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_search_keyboard()
-                )
-            except Exception as e:
-                logger.error(f"Ошибка при отправке подсказки поиска: {e}")
-            return
-
-        await self.perform_search(message, query, state)
-
-    async def handle_search_query(self, message: types.Message, state: FSMContext):
-        """Обработчик обычных сообщений для поиска"""
-        logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
-
-        if not await self.require_access(message):
-            return
-
-        query = message.text.strip()
-
-        try:
-            await self.bot.send_chat_action(message.chat.id, "typing")
-        except Exception as e:
-            logger.error(f"Ошибка отправки действия: {e}")
-
-        await self.perform_search(message, query, state)
 
     async def send_single_message(self, chat_id, text, **kwargs):
         """Отправляет одно сообщение с обработкой ошибок и задержкой"""
