@@ -157,6 +157,7 @@ class SearchBot:
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
                 if member.status in ['member', 'administrator', 'creator']:
                     has_access = True
+                    logger.info(f"✅ Пользователь {user_id} имеет доступ через группу {group_id}")
                     break  # Достаточно быть участником одной группы
             except Exception as e:
                 logger.warning(f"Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
@@ -167,6 +168,9 @@ class SearchBot:
             'has_access': has_access,
             'timestamp': time.time()
         }
+
+        if not has_access:
+            logger.info(f"❌ Пользователь {user_id} не имеет доступа ни к одной из разрешенных групп")
 
         return has_access
 
@@ -743,5 +747,3 @@ class SearchBot:
             logger.error(f"❌ Ошибка запуска бота: {e}")
         finally:
             await self.close_session()
-
-
