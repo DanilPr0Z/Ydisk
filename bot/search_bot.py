@@ -60,7 +60,7 @@ class SearchBot:
         self.cache_timeout = 300  # 5 минут
 
         # Ограничитель скорости отправки сообщений
-        self.rate_limit_delay = 0.5  # Задержка между сообщениями в секундах
+        self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
 
         # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
         self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
@@ -347,7 +347,7 @@ class SearchBot:
     async def send_single_message(self, chat_id, text, **kwargs):
         """Отправляет одно сообщение с обработкой ошибок и задержкой"""
         try:
-            await asyncio.sleep(self.rate_limit_delay)  # Задержка между сообщениями
+            await asyncio.sleep(self.rate_limit_delay)  # Задержка 0.1 секунды между сообщениями
             return await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
         except TelegramRetryAfter as e:
             logger.warning(f"⚠️ Rate limit, waiting {e.retry_after}s")
@@ -395,8 +395,7 @@ class SearchBot:
             if header_msg:
                 current_messages.append(header_msg.message_id)
 
-            # Отправляем файлы по одному с задержкой
-            sent_files = 0
+            # Отправляем файлы по одному с задержкой 0.1 секунды
             for i, result in enumerate(page_results, start=start_idx + 1):
                 name = html.escape(result['name'])
                 path = html.escape(result['path'])
@@ -423,13 +422,8 @@ class SearchBot:
 
                 if file_msg:
                     current_messages.append(file_msg.message_id)
-                    sent_files += 1
                 else:
                     logger.warning(f"⚠️ Не удалось отправить файл {i}")
-
-                # Если отправлено 5 файлов, делаем дополнительную паузу
-                if sent_files % 5 == 0:
-                    await asyncio.sleep(1)
 
             # Отправляем навигацию
             nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
