@@ -62,22 +62,25 @@ class SearchBot:
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
 
-        # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
-        self.router.message.register(self.start, Command("start"), F.chat.type == ChatType.PRIVATE)
-        self.router.message.register(self.search_command, Command("search"), F.chat.type == ChatType.PRIVATE)
-        self.router.message.register(self.help_command, Command("help"), F.chat.type == ChatType.PRIVATE)
+        # Кэш проверки доступа пользователей (чтобы не проверять каждый раз)
+        self.access_cache = {}
+        self.access_cache_timeout = 300  # 5 минут
 
-        # Обработчик Reply-кнопок с более строгим фильтром
+        # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
+        # Сначала команды, потом остальные сообщения
+        self.router.message.register(self.start, Command("start"))
+        self.router.message.register(self.search_command, Command("search"))
+        self.router.message.register(self.help_command, Command("help"))
+
+        # Обработчик Reply-кнопок
         self.router.message.register(
             self.handle_reply_buttons,
-            F.chat.type == ChatType.PRIVATE,
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
         # Обработчик обычных сообщений для поиска - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
         self.router.message.register(
             self.handle_search_query,
-            F.chat.type == ChatType.PRIVATE,
             F.text
         )
 
@@ -132,37 +135,77 @@ class SearchBot:
 
     async def is_user_member_of_any_group(self, user_id: int) -> bool:
         """Проверяет, является ли пользователь участником любой из разрешенных групп"""
-        if not self.allowed_group_ids:
-            return True  # Если группы не указаны, доступ разрешен всем
+        # Проверяем кэш
+        cache_key = str(user_id)
+        if cache_key in self.access_cache:
+            cache_data = self.access_cache[cache_key]
+            if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
+                return cache_data['has_access']
 
+        if not self.allowed_group_ids:
+            # Если группы не указаны, доступ разрешен всем
+            self.access_cache[cache_key] = {
+                'has_access': True,
+                'timestamp': time.time()
+            }
+            return True
+
+        has_access = False
         for group_id in self.allowed_group_ids:
             try:
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
                 if member.status in ['member', 'administrator', 'creator']:
-                    return True
-            except Exception:
+                    has_access = True
+                    break
+            except Exception as e:
+                logger.warning(f"Ошибка проверки доступа для группы {group_id}: {e}")
                 continue
 
-        return False
+        # Сохраняем в кэш
+        self.access_cache[cache_key] = {
+            'has_access': has_access,
+            'timestamp': time.time()
+        }
+
+        return has_access
 
     async def check_access(self, message: types.Message) -> bool:
         """Проверяет доступ и отправляет сообщение если доступ запрещен"""
-        if not await self.is_user_member_of_any_group(message.from_user.id):
-            try:
-                await message.answer(
-                    "❌ <b>Доступ запрещен</b>\n\n"
-                    "Этот бот доступен только для участников разрешенных групп.\n"
-                    "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=ReplyKeyboardRemove()
-                )
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения о доступе: {e}")
-            return False
-        return True
+        user_id = message.from_user.id
+
+        # Проверяем кэш
+        cache_key = str(user_id)
+        if cache_key in self.access_cache:
+            cache_data = self.access_cache[cache_key]
+            if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
+                if not cache_data['has_access']:
+                    await self.send_access_denied(message)
+                return cache_data['has_access']
+
+        has_access = await self.is_user_member_of_any_group(user_id)
+
+        if not has_access:
+            await self.send_access_denied(message)
+
+        return has_access
+
+    async def send_access_denied(self, message: types.Message):
+        """Отправляет сообщение о запрете доступа"""
+        try:
+            await message.answer(
+                "❌ <b>Доступ запрещен</b>\n\n"
+                "Этот бот доступен только для участников разрешенных групп.\n"
+                "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения о доступе: {e}")
 
     async def start(self, message: types.Message):
-        """Обработчик команды /start (только в ЛС)"""
+        """Обработчик команды /start"""
+        logger.info(f"🔹 /start от пользователя {message.from_user.id}")
+
         if not await self.check_access(message):
             return
 
@@ -192,6 +235,8 @@ class SearchBot:
 
     async def help_command(self, message: types.Message):
         """Обработчик команды /help"""
+        logger.info(f"🔹 /help от пользователя {message.from_user.id}")
+
         if not await self.check_access(message):
             return
 
@@ -214,6 +259,7 @@ class SearchBot:
 <b>Навигация:</b>
 • Используйте кнопки "Показать еще" для просмотра всех результатов
 • Нажмите на номер файла для получения ссылок
+• Содержание https://disk.yandex.ru/i/3je4lFfG5VxFzw
         """
 
         try:
@@ -227,6 +273,8 @@ class SearchBot:
 
     async def handle_reply_buttons(self, message: types.Message):
         """Обработчик Reply-кнопок"""
+        logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
+
         if not await self.check_access(message):
             return
 
@@ -294,7 +342,9 @@ class SearchBot:
             logger.error(f"Ошибка при обработке reply-кнопки: {e}")
 
     async def search_command(self, message: types.Message, state: FSMContext):
-        """Обработчик команды /search (только в ЛС)"""
+        """Обработчик команды /search"""
+        logger.info(f"🔹 /search от пользователя {message.from_user.id}")
+
         if not await self.check_access(message):
             return
 
@@ -328,12 +378,16 @@ class SearchBot:
 
     async def handle_search_query(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений для поиска"""
+        # Игнорируем команды (они уже обработаны выше)
+        if message.text.startswith('/'):
+            return
+
+        logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
+
         if not await self.check_access(message):
             return
 
         query = message.text.strip()
-
-        logger.info(f"🔍 Получен поисковый запрос: '{query}'")
 
         # Отправляем действие "печатает" чтобы избежать таймаута
         try:
@@ -374,7 +428,9 @@ class SearchBot:
                 current_query=query
             )
 
+            # Удаляем предыдущие сообщения с задержкой
             if previous_messages:
+                await asyncio.sleep(0.1)  # Задержка перед удалением
                 asyncio.create_task(
                     self.delete_messages_batch(chat_id, previous_messages)
                 )
@@ -469,30 +525,44 @@ class SearchBot:
             return []
 
     async def delete_messages_batch(self, chat_id, message_ids):
-        """Быстрое удаление сообщений пачками"""
+        """Быстрое удаление сообщений пачками с обработкой ошибок"""
         if not message_ids:
             return
 
         delete_tasks = []
         for msg_id in message_ids:
             try:
+                # Добавляем небольшую задержку между удалениями
+                await asyncio.sleep(0.05)  # 50ms между удалениями
                 task = asyncio.create_task(
                     self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 )
                 delete_tasks.append(task)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось создать задачу удаления сообщения {msg_id}: {e}")
                 continue
 
         if delete_tasks:
             try:
-                await asyncio.wait_for(
+                # Ждем завершения всех задач удаления
+                results = await asyncio.wait_for(
                     asyncio.gather(*delete_tasks, return_exceptions=True),
-                    timeout=5.0
+                    timeout=10.0  # Увеличил таймаут до 10 секунд
                 )
+
+                # Логируем результаты удаления
+                success_count = sum(1 for result in results if result is True or result is None)
+                error_count = sum(1 for result in results if isinstance(result, Exception))
+
+                if error_count > 0:
+                    logger.warning(f"⚠️ Удалено {success_count}/{len(delete_tasks)} сообщений, ошибок: {error_count}")
+                else:
+                    logger.info(f"✅ Успешно удалено {success_count} сообщений")
+
             except asyncio.TimeoutError:
-                pass
-            except Exception:
-                pass
+                logger.warning(f"⏰ Таймаут при удалении {len(delete_tasks)} сообщений")
+            except Exception as e:
+                logger.error(f"❌ Неожиданная ошибка при удалении сообщений: {e}")
 
     async def execute_search_with_timeout(self, query: str, timeout: int = 55):
         """Выполнение поиска с ограничением по времени"""
