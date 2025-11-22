@@ -62,30 +62,26 @@ class SearchBot:
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
 
-        # Кэш проверки доступа пользователей
-        self.access_cache = {}
-        self.access_cache_timeout = 600  # 10 минут
-
         # Регистрируем обработчики
         self.register_handlers()
 
     def register_handlers(self):
         """Регистрирует все обработчики"""
-        # Обработчики команд
+        # Обработчики команд - ВЫСОКИЙ ПРИОРИТЕТ
         self.router.message.register(self.start, Command("start"))
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.help_command, Command("help"))
 
-        # Обработчик Reply-кнопок
+        # Обработчик Reply-кнопок - ВЫСОКИЙ ПРИОРИТЕТ
         self.router.message.register(
             self.handle_reply_buttons,
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
-        # Обработчик обычных сообщений для поиска
+        # Обработчик обычных сообщений для поиска - НИЗКИЙ ПРИОРИТЕТ
         self.router.message.register(
             self.handle_search_query,
-            F.text
+            F.text & ~F.text.startswith('/')
         )
 
         # Callback обработчики
@@ -138,39 +134,41 @@ class SearchBot:
         await self.bot.set_my_commands(commands)
 
     async def check_user_access(self, user_id: int) -> bool:
-        """Быстрая проверка доступа пользователя ко всем разрешенным группам"""
+        """Проверка доступа пользователя ко всем разрешенным группам (без кэширования)"""
         # Если группы не указаны, доступ разрешен всем
         if not self.allowed_group_ids:
+            logger.info(f"✅ Группы не указаны, доступ разрешен для {user_id}")
             return True
 
-        # Проверяем кэш
-        cache_key = str(user_id)
-        if cache_key in self.access_cache:
-            cache_data = self.access_cache[cache_key]
-            if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
-                return cache_data['has_access']
+        logger.info(f"🔹 Проверка доступа для пользователя {user_id}")
+        logger.info(f"🔹 Разрешенные группы: {self.allowed_group_ids}")
 
-        # Проверяем все группы из списка
+        # Проверяем все группы из списка (без кэширования)
         has_access = False
+        accessible_group = None
+
         for group_id in self.allowed_group_ids:
             try:
+                logger.info(f"🔍 Проверяем группу {group_id} для пользователя {user_id}")
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
+                logger.info(f"📊 Статус пользователя {user_id} в группе {group_id}: {member.status}")
+
                 if member.status in ['member', 'administrator', 'creator']:
                     has_access = True
+                    accessible_group = group_id
                     logger.info(f"✅ Пользователь {user_id} имеет доступ через группу {group_id}")
                     break  # Достаточно быть участником одной группы
+                else:
+                    logger.info(f"❌ Пользователь {user_id} не участник группы {group_id}, статус: {member.status}")
+
             except Exception as e:
-                logger.warning(f"Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
+                logger.error(f"🚫 Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
                 continue  # Продолжаем проверять другие группы
 
-        # Сохраняем в кэш
-        self.access_cache[cache_key] = {
-            'has_access': has_access,
-            'timestamp': time.time()
-        }
-
-        if not has_access:
-            logger.info(f"❌ Пользователь {user_id} не имеет доступа ни к одной из разрешенных групп")
+        if has_access:
+            logger.info(f"🎉 ПОЛЬЗОВАТЕЛЬ {user_id} ИМЕЕТ ДОСТУП (группа: {accessible_group})")
+        else:
+            logger.info(f"🔒 ПОЛЬЗОВАТЕЛЬ {user_id} НЕ ИМЕЕТ ДОСТУП НИ К ОДНОЙ ГРУППЕ")
 
         return has_access
 
@@ -373,9 +371,6 @@ class SearchBot:
 
     async def handle_search_query(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений для поиска"""
-        if message.text.startswith('/'):
-            return
-
         logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
 
         if not await self.require_access(message):
