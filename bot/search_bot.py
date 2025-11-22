@@ -19,7 +19,6 @@ from aiogram.enums import ParseMode, ChatType
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 from dotenv import load_dotenv
 
@@ -46,16 +45,8 @@ class SearchBot:
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
-        # Создаем бота с увеличенными таймаутами
-        self.bot = Bot(
-            token=self.token,
-            default=DefaultBotProperties(
-                timeout=60,  # Увеличенный таймаут
-                read_timeout=60,
-                write_timeout=60,
-                connect_timeout=30
-            )
-        )
+        # Создаем бота БЕЗ DefaultBotProperties (для совместимости)
+        self.bot = Bot(token=self.token)
         self.storage = MemoryStorage()
         self.dp = Dispatcher(storage=self.storage)
         self.router = Router()
@@ -220,7 +211,6 @@ class SearchBot:
 <b>Навигация:</b>
 • Используйте кнопки "Показать еще" для просмотра всех результатов
 • Нажмите на номер файла для получения ссылок
-• Содержание всех файлов https://disk.yandex.ru/i/3je4lFfG5VxFzw
         """
 
         try:
@@ -351,54 +341,6 @@ class SearchBot:
         # Выполняем поиск
         await self.perform_search(message, query, state)
 
-    def split_message(self, text, max_length=4000):
-        """Разбивает длинное сообщение на части"""
-        if len(text) <= max_length:
-            return [text]
-
-        parts = []
-        while text:
-            if len(text) <= max_length:
-                parts.append(text)
-                break
-
-            split_pos = text.rfind('\n', 0, max_length)
-            if split_pos == -1:
-                split_pos = text.rfind(' ', 0, max_length)
-            if split_pos == -1:
-                split_pos = max_length
-
-            parts.append(text[:split_pos])
-            text = text[split_pos:].lstrip()
-
-        return parts
-
-    async def delete_messages_batch(self, chat_id, message_ids):
-        """Быстрое удаление сообщений пачками"""
-        if not message_ids:
-            return
-
-        delete_tasks = []
-        for msg_id in message_ids:
-            try:
-                task = asyncio.create_task(
-                    self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                )
-                delete_tasks.append(task)
-            except Exception:
-                continue
-
-        if delete_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*delete_tasks, return_exceptions=True),
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                pass
-
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
         """Отправляет одну страницу результатов (10 файлов)"""
         try:
@@ -515,6 +457,32 @@ class SearchBot:
         except Exception as e:
             logger.error(f"Ошибка при отправке страницы результатов: {e}")
             return []
+
+    async def delete_messages_batch(self, chat_id, message_ids):
+        """Быстрое удаление сообщений пачками"""
+        if not message_ids:
+            return
+
+        delete_tasks = []
+        for msg_id in message_ids:
+            try:
+                task = asyncio.create_task(
+                    self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                )
+                delete_tasks.append(task)
+            except Exception:
+                continue
+
+        if delete_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*delete_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
 
     async def execute_search_with_timeout(self, query: str, timeout: int = 55):
         """Выполнение поиска с ограничением по времени"""
@@ -741,7 +709,7 @@ class SearchBot:
     async def get_session(self):
         """Создает aiohttp сессию при необходимости"""
         if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=30)  # Уменьшенный таймаут для HTTP
+            timeout = aiohttp.ClientTimeout(total=30)  # Таймаут для HTTP запросов
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
@@ -776,5 +744,3 @@ class SearchBot:
             logger.error(f"❌ Ошибка запуска бота: {e}")
         finally:
             await self.close_session()
-
-
