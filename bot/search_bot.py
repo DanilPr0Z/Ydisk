@@ -40,12 +40,12 @@ class SearchBot:
 
         # Получаем ID разрешенных групп из .env
         allowed_groups = os.getenv('ALLOWED_GROUP_IDS', '')
-        self.allowed_group_ids = [group_id.strip() for group_id in allowed_groups.split(',') if group_id.strip()]
+        self.allowed_group_ids = [int(group_id.strip()) for group_id in allowed_groups.split(',') if group_id.strip()]
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
-        # Создаем бота БЕЗ DefaultBotProperties (для совместимости)
+        # Создаем бота
         self.bot = Bot(token=self.token)
         self.storage = MemoryStorage()
         self.dp = Dispatcher(storage=self.storage)
@@ -62,12 +62,16 @@ class SearchBot:
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
 
-        # Кэш проверки доступа пользователей (чтобы не проверять каждый раз)
+        # Кэш проверки доступа пользователей
         self.access_cache = {}
-        self.access_cache_timeout = 300  # 5 минут
+        self.access_cache_timeout = 600  # 10 минут
 
-        # Регистрируем обработчики в ПРАВИЛЬНОМ порядке
-        # Сначала команды, потом остальные сообщения
+        # Регистрируем обработчики
+        self.register_handlers()
+
+    def register_handlers(self):
+        """Регистрирует все обработчики"""
+        # Обработчики команд
         self.router.message.register(self.start, Command("start"))
         self.router.message.register(self.search_command, Command("search"))
         self.router.message.register(self.help_command, Command("help"))
@@ -78,7 +82,7 @@ class SearchBot:
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
-        # Обработчик обычных сообщений для поиска - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
+        # Обработчик обычных сообщений для поиска
         self.router.message.register(
             self.handle_search_query,
             F.text
@@ -133,8 +137,12 @@ class SearchBot:
         ]
         await self.bot.set_my_commands(commands)
 
-    async def is_user_member_of_any_group(self, user_id: int) -> bool:
-        """Проверяет, является ли пользователь участником любой из разрешенных групп"""
+    async def check_user_access(self, user_id: int) -> bool:
+        """Быстрая проверка доступа пользователя ко всем разрешенным группам"""
+        # Если группы не указаны, доступ разрешен всем
+        if not self.allowed_group_ids:
+            return True
+
         # Проверяем кэш
         cache_key = str(user_id)
         if cache_key in self.access_cache:
@@ -142,24 +150,17 @@ class SearchBot:
             if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
                 return cache_data['has_access']
 
-        if not self.allowed_group_ids:
-            # Если группы не указаны, доступ разрешен всем
-            self.access_cache[cache_key] = {
-                'has_access': True,
-                'timestamp': time.time()
-            }
-            return True
-
+        # Проверяем все группы из списка
         has_access = False
         for group_id in self.allowed_group_ids:
             try:
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
                 if member.status in ['member', 'administrator', 'creator']:
                     has_access = True
-                    break
+                    break  # Достаточно быть участником одной группы
             except Exception as e:
-                logger.warning(f"Ошибка проверки доступа для группы {group_id}: {e}")
-                continue
+                logger.warning(f"Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
+                continue  # Продолжаем проверять другие группы
 
         # Сохраняем в кэш
         self.access_cache[cache_key] = {
@@ -169,20 +170,11 @@ class SearchBot:
 
         return has_access
 
-    async def check_access(self, message: types.Message) -> bool:
+    async def require_access(self, message: types.Message) -> bool:
         """Проверяет доступ и отправляет сообщение если доступ запрещен"""
         user_id = message.from_user.id
 
-        # Проверяем кэш
-        cache_key = str(user_id)
-        if cache_key in self.access_cache:
-            cache_data = self.access_cache[cache_key]
-            if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
-                if not cache_data['has_access']:
-                    await self.send_access_denied(message)
-                return cache_data['has_access']
-
-        has_access = await self.is_user_member_of_any_group(user_id)
+        has_access = await self.check_user_access(user_id)
 
         if not has_access:
             await self.send_access_denied(message)
@@ -206,7 +198,7 @@ class SearchBot:
         """Обработчик команды /start"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
 
-        if not await self.check_access(message):
+        if not await self.require_access(message):
             return
 
         welcome_text = """
@@ -237,7 +229,7 @@ class SearchBot:
         """Обработчик команды /help"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
 
-        if not await self.check_access(message):
+        if not await self.require_access(message):
             return
 
         help_text = """
@@ -259,7 +251,6 @@ class SearchBot:
 <b>Навигация:</b>
 • Используйте кнопки "Показать еще" для просмотра всех результатов
 • Нажмите на номер файла для получения ссылок
-• Содержание https://disk.yandex.ru/i/3je4lFfG5VxFzw
         """
 
         try:
@@ -275,7 +266,7 @@ class SearchBot:
         """Обработчик Reply-кнопок"""
         logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
 
-        if not await self.check_access(message):
+        if not await self.require_access(message):
             return
 
         text = message.text
@@ -345,13 +336,12 @@ class SearchBot:
         """Обработчик команды /search"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
 
-        if not await self.check_access(message):
+        if not await self.require_access(message):
             return
 
         query = message.text.replace('/search', '').strip()
 
         if not query:
-            # Показываем подсказку по поиску
             search_help_text = """
 🔍 <b>Поиск файлов</b>
 
@@ -378,30 +368,27 @@ class SearchBot:
 
     async def handle_search_query(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений для поиска"""
-        # Игнорируем команды (они уже обработаны выше)
         if message.text.startswith('/'):
             return
 
         logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
 
-        if not await self.check_access(message):
+        if not await self.require_access(message):
             return
 
         query = message.text.strip()
 
-        # Отправляем действие "печатает" чтобы избежать таймаута
         try:
             await self.bot.send_chat_action(message.chat.id, "typing")
         except Exception as e:
             logger.error(f"Ошибка отправки действия: {e}")
 
-        # Выполняем поиск
         await self.perform_search(message, query, state)
 
     async def send_single_message(self, chat_id, text, **kwargs):
         """Отправляет одно сообщение с обработкой ошибок и задержкой"""
         try:
-            await asyncio.sleep(self.rate_limit_delay)  # Задержка 0.1 секунды между сообщениями
+            await asyncio.sleep(self.rate_limit_delay)
             return await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
         except TelegramRetryAfter as e:
             logger.warning(f"⚠️ Rate limit, waiting {e.retry_after}s")
@@ -412,7 +399,7 @@ class SearchBot:
             return None
 
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
-        """Отправляет одну страницу результатов (10 файлов) с ограничением скорости"""
+        """Отправляет одну страницу результатов"""
         try:
             page_size = 10
             start_idx = page * page_size
@@ -428,16 +415,12 @@ class SearchBot:
                 current_query=query
             )
 
-            # Удаляем предыдущие сообщения с задержкой
             if previous_messages:
-                await asyncio.sleep(0.1)  # Задержка перед удалением
-                asyncio.create_task(
-                    self.delete_messages_batch(chat_id, previous_messages)
-                )
+                await asyncio.sleep(0.3)
+                await self.delete_messages_batch(chat_id, previous_messages)
 
             current_messages = []
 
-            # Отправляем заголовок
             if page == 0:
                 header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
             else:
@@ -451,7 +434,6 @@ class SearchBot:
             if header_msg:
                 current_messages.append(header_msg.message_id)
 
-            # Отправляем файлы по одному с задержкой 0.1 секунды
             for i, result in enumerate(page_results, start=start_idx + 1):
                 name = html.escape(result['name'])
                 path = html.escape(result['path'])
@@ -481,7 +463,6 @@ class SearchBot:
                 else:
                     logger.warning(f"⚠️ Не удалось отправить файл {i}")
 
-            # Отправляем навигацию
             nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
 
             nav_builder = InlineKeyboardBuilder()
@@ -507,16 +488,6 @@ class SearchBot:
             if nav_msg:
                 current_messages.append(nav_msg.message_id)
 
-            # После показа результатов возвращаем меню поиска
-            menu_msg = await self.send_single_message(
-                chat_id=chat_id,
-                text="💡 <b>Что дальше?</b>\n\nВведите новый запрос для поиска или используйте кнопки меню:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self.get_search_keyboard()
-            )
-            if menu_msg:
-                current_messages.append(menu_msg.message_id)
-
             await state.update_data(current_messages=current_messages)
             return current_messages
 
@@ -525,49 +496,33 @@ class SearchBot:
             return []
 
     async def delete_messages_batch(self, chat_id, message_ids):
-        """Быстрое удаление сообщений пачками с обработкой ошибок"""
+        """Быстрое удаление сообщений пачками"""
         if not message_ids:
             return
 
         delete_tasks = []
         for msg_id in message_ids:
             try:
-                # Добавляем небольшую задержку между удалениями
-                await asyncio.sleep(0.05)  # 50ms между удалениями
+                await asyncio.sleep(0.2)
                 task = asyncio.create_task(
                     self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 )
                 delete_tasks.append(task)
             except Exception as e:
-                logger.warning(f"⚠️ Не удалось создать задачу удаления сообщения {msg_id}: {e}")
                 continue
 
         if delete_tasks:
             try:
-                # Ждем завершения всех задач удаления
-                results = await asyncio.wait_for(
+                await asyncio.wait_for(
                     asyncio.gather(*delete_tasks, return_exceptions=True),
-                    timeout=10.0  # Увеличил таймаут до 10 секунд
+                    timeout=15.0
                 )
-
-                # Логируем результаты удаления
-                success_count = sum(1 for result in results if result is True or result is None)
-                error_count = sum(1 for result in results if isinstance(result, Exception))
-
-                if error_count > 0:
-                    logger.warning(f"⚠️ Удалено {success_count}/{len(delete_tasks)} сообщений, ошибок: {error_count}")
-                else:
-                    logger.info(f"✅ Успешно удалено {success_count} сообщений")
-
-            except asyncio.TimeoutError:
-                logger.warning(f"⏰ Таймаут при удалении {len(delete_tasks)} сообщений")
-            except Exception as e:
-                logger.error(f"❌ Неожиданная ошибка при удалении сообщений: {e}")
+            except (asyncio.TimeoutError, Exception):
+                pass
 
     async def execute_search_with_timeout(self, query: str, timeout: int = 55):
         """Выполнение поиска с ограничением по времени"""
         try:
-            # Проверяем кэш
             cache_key = query.lower().strip()
             if cache_key in self.search_cache:
                 cache_data = self.search_cache[cache_key]
@@ -575,18 +530,15 @@ class SearchBot:
                     logger.info(f"📦 Используем кэш для запроса: {query}")
                     return cache_data['results']
 
-            # Выполняем поиск с таймаутом
             return await asyncio.wait_for(self.search_files_api(query), timeout=timeout)
 
         except asyncio.TimeoutError:
-            # Очищаем кэш при таймауте
             if cache_key in self.search_cache:
                 del self.search_cache[cache_key]
             raise
 
     async def search_files_api(self, query: str):
         """Поиск файлов через API"""
-        # Проверяем кэш еще раз (на случай конкурентных запросов)
         cache_key = query.lower().strip()
         if cache_key in self.search_cache:
             cache_data = self.search_cache[cache_key]
@@ -602,14 +554,11 @@ class SearchBot:
                 logger.info(f"🌐 Получен ответ: {response.status}")
 
                 if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"❌ Ошибка API: {response.status} - {error_text}")
                     return {'results_count': 0, 'results': []}
 
                 data = await response.json()
                 logger.info(f"📊 Получено результатов: {data.get('results_count', 0)}")
 
-                # Сохраняем в кэш
                 self.search_cache[cache_key] = {
                     'results': data,
                     'timestamp': time.time()
@@ -625,21 +574,19 @@ class SearchBot:
             return {'results_count': 0, 'results': []}
 
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
-        """Выполняет поиск через API асинхронно с обработкой ошибок"""
+        """Выполняет поиск через API"""
         start_time = time.time()
         progress_msg = None
 
         try:
             logger.info(f"🔍 Начинаем поиск: '{query}'")
 
-            # Отправляем сообщение о начале поиска
             progress_msg = await self.send_single_message(
                 chat_id=message.chat.id,
                 text=f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                 parse_mode=ParseMode.HTML
             )
 
-            # Выполняем поиск с таймаутом
             data = await self.execute_search_with_timeout(query, timeout=55)
 
             execution_time = time.time() - start_time
@@ -649,10 +596,7 @@ class SearchBot:
                 if progress_msg:
                     await progress_msg.edit_text(
                         f"❌ По запросу '<b>{html.escape(query)}</b>' ничего не найдено\n\n"
-                        f"💡 <i>Попробуйте:</i>\n"
-                        f"• Уточнить запрос\n"
-                        f"• Использовать другие ключевые слова\n"
-                        f"• Проверить орфографию",
+                        f"💡 <i>Попробуйте уточнить запрос</i>",
                         parse_mode=ParseMode.HTML
                     )
                 return
@@ -673,63 +617,41 @@ class SearchBot:
             if progress_msg:
                 await progress_msg.edit_text(
                     f"⏰ <b>Поиск занял слишком много времени</b>\n\n"
-                    f"Запрос: <b>{html.escape(query)}</b>\n\n"
-                    f"💡 <i>Попробуйте:</i>\n"
-                    f"• Упростить запрос\n"
-                    f"• Разбить на несколько слов\n"
-                    f"• Повторить позже",
+                    f"Попробуйте упростить запрос",
                     parse_mode=ParseMode.HTML
                 )
 
         except TelegramRetryAfter as e:
             logger.warning(f"⚠️ Telegram RetryAfter: {e.retry_after}")
             await asyncio.sleep(e.retry_after)
-            # Повторяем поиск после ожидания
             await self.perform_search(message, query, state)
 
-        except TelegramNetworkError as e:
-            logger.error(f"❌ Сетевая ошибка Telegram: {e}")
-            if progress_msg:
-                await progress_msg.edit_text(
-                    f"❌ <b>Сетевая ошибка</b>\n\n"
-                    f"Не удалось отправить результаты поиска.\n"
-                    f"Попробуйте повторить запрос через минуту.",
-                    parse_mode=ParseMode.HTML
-                )
-
         except Exception as e:
-            logger.error(f"❌ Неожиданная ошибка при поиске '{query}': {e}")
+            logger.error(f"❌ Ошибка при поиске '{query}': {e}")
             if progress_msg:
                 await progress_msg.edit_text(
                     f"❌ <b>Произошла ошибка при поиске</b>\n\n"
-                    f"Запрос: <b>{html.escape(query)}</b>\n\n"
-                    f"💡 <i>Попробуйте другой запрос или повторите позже</i>",
+                    f"Попробуйте позже",
                     parse_mode=ParseMode.HTML
                 )
 
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки файлов"""
-        if not await self.is_user_member_of_any_group(callback_query.from_user.id):
-            await callback_query.answer("❌ Доступ запрещен. Вступите в одну из разрешенных групп.", show_alert=True)
+        if not await self.check_user_access(callback_query.from_user.id):
+            await callback_query.answer("❌ Доступ запрещен", show_alert=True)
             return
 
         try:
             file_index = int(callback_query.data.split('_')[1])
-
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
 
             if file_index < len(results):
                 file_info = results[file_index]
-
                 name = html.escape(file_info['name'])
                 path = html.escape(file_info['path'])
 
-                file_text = f"""
-📄 <b>{name}</b>
-
-📁 <b>Путь:</b> {path}
-                """
+                file_text = f"📄 <b>{name}</b>\n\n📁 <b>Путь:</b> {path}"
 
                 builder = InlineKeyboardBuilder()
                 if file_info.get('public_link'):
@@ -754,24 +676,23 @@ class SearchBot:
 
         except Exception as e:
             logger.error(f"Callback error: {e}")
-            await callback_query.answer("❌ Ошибка при получении информации о файле")
+            await callback_query.answer("❌ Ошибка")
 
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопки навигации"""
-        if not await self.is_user_member_of_any_group(callback_query.from_user.id):
-            await callback_query.answer("❌ Доступ запрещен. Вступите в одну из разрешенных групп.", show_alert=True)
+        if not await self.check_user_access(callback_query.from_user.id):
+            await callback_query.answer("❌ Доступ запрещен", show_alert=True)
             return
 
         try:
             page = int(callback_query.data.split('_')[1])
-
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
             query = user_data.get('current_query', '')
             previous_messages = user_data.get('current_messages', [])
 
             if not results:
-                await callback_query.answer("❌ Результаты поиска устарели")
+                await callback_query.answer("❌ Результаты устарели")
                 return
 
             await callback_query.answer("⏳ Загружаем...")
@@ -787,12 +708,12 @@ class SearchBot:
 
         except Exception as e:
             logger.error(f"More callback error: {e}")
-            await callback_query.answer("❌ Ошибка при загрузке файлов")
+            await callback_query.answer("❌ Ошибка")
 
     async def get_session(self):
-        """Создает aiohttp сессию при необходимости"""
+        """Создает aiohttp сессию"""
         if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=30)  # Таймаут для HTTP запросов
+            timeout = aiohttp.ClientTimeout(total=30)
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
@@ -803,21 +724,16 @@ class SearchBot:
             self.session = None
 
     async def run(self):
-        """Запускает бота с улучшенной обработкой ошибок"""
+        """Запускает бота"""
         logger.info("🤖 Бот запускается...")
 
-        # Устанавливаем команды меню
         await self.setup_bot_commands()
-
-        # Закрываем возможные старые сессии
         await self.close_session()
 
         try:
-            # Проверяем подключение к Telegram API
             me = await self.bot.get_me()
             logger.info(f"✅ Бот @{me.username} успешно подключен")
 
-            # Запускаем polling с обработкой конфликтов
             await self.dp.start_polling(
                 self.bot,
                 allowed_updates=["message", "callback_query"],
@@ -827,4 +743,5 @@ class SearchBot:
             logger.error(f"❌ Ошибка запуска бота: {e}")
         finally:
             await self.close_session()
+
 
