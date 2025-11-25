@@ -117,11 +117,6 @@ class SearchBot:
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
 
-        # Добавляем middleware для проверки доступа
-        self.access_middleware = AccessMiddleware(self.bot, self.allowed_group_ids)
-        self.dp.message.middleware(self.access_middleware)
-        self.dp.callback_query.middleware(self.access_middleware)
-
         # Регистрируем обработчики
         self.register_handlers()
 
@@ -148,9 +143,33 @@ class SearchBot:
         self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
 
+    async def check_access(self, user_id: int) -> bool:
+        """Проверяет доступ пользователя"""
+        # Если группы не указаны, доступ разрешен всем
+        if not self.allowed_group_ids:
+            return True
+
+        # Проверяем все группы из списка
+        for group_id in self.allowed_group_ids:
+            try:
+                member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
+                if member.status in ['member', 'administrator', 'creator']:
+                    return True
+            except Exception as e:
+                logger.warning(f"Ошибка проверки доступа для пользователя {user_id} в группе {group_id}: {e}")
+                continue
+
+        return False
+
     async def start(self, message: types.Message):
         """Обработчик команды /start"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         welcome_text = """
 🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
@@ -179,6 +198,12 @@ class SearchBot:
     async def search_command(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         query = message.text.replace('/search', '').strip()
 
@@ -210,6 +235,12 @@ class SearchBot:
     async def help_command(self, message: types.Message):
         """Обработчик команды /help"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         help_text = """
 <b>📖 Помощь по использованию бота</b>
@@ -244,6 +275,12 @@ class SearchBot:
     async def handle_reply_buttons(self, message: types.Message):
         """Обработчик Reply-кнопок"""
         logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         text = message.text
 
@@ -312,6 +349,12 @@ class SearchBot:
         """Обработчик обычных сообщений для поиска"""
         logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
 
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
+
         query = message.text.strip()
 
         try:
@@ -321,7 +364,19 @@ class SearchBot:
 
         await self.perform_search(message, query, state)
 
-    # Остальные методы остаются без изменений...
+    async def send_access_denied(self, message: types.Message):
+        """Отправляет сообщение о запрете доступа"""
+        try:
+            await message.answer(
+                "❌ <b>Доступ запрещен</b>\n\n"
+                "Этот бот доступен только для участников разрешенных групп.\n"
+                "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения о доступе: {e}")
+
     def get_main_menu_keyboard(self):
         """Создает Reply-клавиатуру для главного меню"""
         keyboard = ReplyKeyboardMarkup(
@@ -620,6 +675,12 @@ class SearchBot:
     async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик нажатий на кнопки файлов"""
         try:
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                return
+
             file_index = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -659,6 +720,12 @@ class SearchBot:
     async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопки навигации"""
         try:
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                return
+
             page = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
