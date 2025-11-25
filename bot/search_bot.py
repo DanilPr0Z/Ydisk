@@ -59,9 +59,8 @@ class SearchBot:
         self.search_cache = {}
         self.cache_timeout = 300  # 5 минут
 
-        # Кэш пользователей с доступом (предварительно загруженный)
+        # Кэш пользователей с доступом
         self.allowed_users_cache = set()
-        self.cache_loaded = False
 
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.05
@@ -69,87 +68,40 @@ class SearchBot:
         # Регистрируем обработчики
         self.register_handlers()
 
-    async def preload_allowed_users(self):
-        """Предварительно загружает всех пользователей из разрешенных групп"""
-        if not self.allowed_group_ids:
-            logger.info("✅ Группы не указаны, доступ разрешен всем")
-            self.cache_loaded = True
-            return
-
-        logger.info(f"🔍 Начинаю предварительную загрузку пользователей из {len(self.allowed_group_ids)} групп...")
-
-        total_users = 0
-        for group_id in self.allowed_group_ids:
-            try:
-                logger.info(f"📦 Загружаю пользователей из группы {group_id}...")
-                users_count = await self.load_group_members(group_id)
-                total_users += users_count
-                logger.info(f"✅ Группа {group_id}: загружено {users_count} пользователей")
-
-                # Небольшая задержка между группами
-                await asyncio.sleep(1)
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка загрузки группы {group_id}: {e}")
-                continue
-
-        logger.info(f"✅ Предварительная загрузка завершена. Всего пользователей с доступом: {total_users}")
-        self.cache_loaded = True
-
-    async def load_group_members(self, group_id: int) -> int:
-        """Загружает всех участников группы"""
-        users_count = 0
-        try:
-            # Получаем администраторов группы
-            admins = await self.bot.get_chat_administrators(group_id)
-            for admin in admins:
-                if admin.user.id not in self.allowed_users_cache:
-                    self.allowed_users_cache.add(admin.user.id)
-                    users_count += 1
-
-            # Для больших групп можно добавить получение обычных участников
-            # Но это может быть медленно для очень больших групп
-
-            logger.debug(f"👥 Группа {group_id}: добавлено {users_count} администраторов")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки участников группы {group_id}: {e}")
-
-        return users_count
-
-    async def check_access_fast(self, user_id: int) -> bool:
-        """Сверхбыстрая проверка доступа из кэша"""
+    async def check_access(self, user_id: int) -> bool:
+        """Проверяет доступ пользователя"""
         # Если группы не указаны, доступ разрешен всем
         if not self.allowed_group_ids:
             return True
 
-        # Если кэш еще не загружен, разрешаем доступ (временно)
-        if not self.cache_loaded:
-            logger.warning(f"⚠️ Кэш еще не загружен, временно разрешаем доступ для {user_id}")
+        # Сначала проверяем кэш
+        if user_id in self.allowed_users_cache:
             return True
 
-        # Быстрая проверка в памяти
-        has_access = user_id in self.allowed_users_cache
+        # Если нет в кэше, проверяем через Telegram API
+        logger.info(f"🔍 Проверяем доступ для пользователя {user_id}")
+        has_access = await self.check_access_via_api(user_id)
 
-        # Если не найден в кэше, делаем детальную проверку и добавляем в кэш
-        if not has_access:
-            has_access = await self.check_access_detailed(user_id)
-            if has_access:
-                self.allowed_users_cache.add(user_id)
-                logger.info(f"➕ Добавлен в кэш: {user_id}")
+        # Если доступ есть, добавляем в кэш
+        if has_access:
+            self.allowed_users_cache.add(user_id)
+            logger.info(f"✅ Пользователь {user_id} добавлен в кэш")
 
         return has_access
 
-    async def check_access_detailed(self, user_id: int) -> bool:
-        """Детальная проверка доступа (используется если пользователя нет в кэше)"""
+    async def check_access_via_api(self, user_id: int) -> bool:
+        """Проверяет доступ через Telegram API"""
         for group_id in self.allowed_group_ids:
             try:
                 member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
                 if member.status in ['member', 'administrator', 'creator']:
+                    logger.info(f"✅ Пользователь {user_id} найден в группе {group_id}")
                     return True
             except Exception as e:
-                logger.debug(f"Ошибка детальной проверки для {user_id} в группе {group_id}: {e}")
+                logger.warning(f"⚠️ Ошибка проверки пользователя {user_id} в группе {group_id}: {e}")
                 continue
+
+        logger.info(f"❌ Пользователь {user_id} не найден ни в одной группе")
         return False
 
     def register_handlers(self):
@@ -179,8 +131,8 @@ class SearchBot:
         """Обработчик команды /start"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
 
-        # Быстрая проверка доступа
-        has_access = await self.check_access_fast(message.from_user.id)
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
         if not has_access:
             await self.send_access_denied(message)
             return
@@ -214,8 +166,8 @@ class SearchBot:
         """Обработчик команды /search"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
 
-        # Быстрая проверка доступа
-        has_access = await self.check_access_fast(message.from_user.id)
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
         if not has_access:
             await self.send_access_denied(message)
             return
@@ -251,8 +203,8 @@ class SearchBot:
         """Обработчик команды /help"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
 
-        # Быстрая проверка доступа
-        has_access = await self.check_access_fast(message.from_user.id)
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
         if not has_access:
             await self.send_access_denied(message)
             return
@@ -291,8 +243,8 @@ class SearchBot:
         """Обработчик Reply-кнопок"""
         logger.info(f"🔹 Кнопка '{message.text}' от {message.from_user.id}")
 
-        # Быстрая проверка доступа
-        has_access = await self.check_access_fast(message.from_user.id)
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
         if not has_access:
             await self.send_access_denied(message)
             return
@@ -354,8 +306,8 @@ class SearchBot:
         """Обработчик обычных сообщений для поиска"""
         logger.info(f"🔹 Сообщение от {message.from_user.id}: '{message.text}'")
 
-        # Быстрая проверка доступа
-        has_access = await self.check_access_fast(message.from_user.id)
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
         if not has_access:
             await self.send_access_denied(message)
             return
@@ -608,8 +560,8 @@ class SearchBot:
     async def file_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопок файлов"""
         try:
-            # Быстрая проверка доступа
-            has_access = await self.check_access_fast(callback_query.from_user.id)
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
             if not has_access:
                 await callback_query.answer("❌ Доступ запрещен", show_alert=True)
                 return
@@ -652,8 +604,8 @@ class SearchBot:
     async def more_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик пагинации"""
         try:
-            # Быстрая проверка доступа
-            has_access = await self.check_access_fast(callback_query.from_user.id)
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
             if not has_access:
                 await callback_query.answer("❌ Доступ запрещен", show_alert=True)
                 return
@@ -694,9 +646,6 @@ class SearchBot:
         """Запускает бота"""
         logger.info("🤖 Запуск бота...")
 
-        # Предварительно загружаем кэш пользователей
-        await self.preload_allowed_users()
-
         await self.setup_commands()
 
         try:
@@ -708,5 +657,4 @@ class SearchBot:
             logger.error(f"❌ Ошибка: {e}")
         finally:
             await self.close_session()
-
 
