@@ -70,13 +70,13 @@ class SearchBot:
         self.register_handlers()
 
     async def load_all_members_fast(self):
-        """Быстрая загрузка всех участников групп через администраторов"""
+        """Быстрая загрузка всех участников групп"""
         if not self.allowed_group_ids:
             logger.info("✅ Группы не указаны, доступ разрешен всем")
             self.cache_loaded = True
             return
 
-        logger.info(f"🚀 Начинаю быструю загрузку участников из {len(self.allowed_group_ids)} групп...")
+        logger.info(f"🚀 Начинаю загрузку участников из {len(self.allowed_group_ids)} групп...")
         print("🔄 ЗАГРУЗКА КЭША: Начинаю сбор пользователей из групп...")
 
         total_members = 0
@@ -87,20 +87,40 @@ class SearchBot:
                 logger.info(f"📦 Загружаю пользователей из группы {group_id}...")
                 print(f"📦 Обрабатываю группу {group_id}...")
 
-                # Загружаем администраторов (быстро)
-                admins = await self.bot.get_chat_administrators(group_id)
-                admin_count = len(admins)
+                # Загружаем ВСЕХ участников группы
+                members_count = 0
+                try:
+                    async for member in self.bot.get_chat_members(group_id):
+                        if member.user.id not in self.allowed_users_cache:
+                            self.allowed_users_cache.add(member.user.id)
+                            total_members += 1
+                            members_count += 1
 
-                for admin in admins:
-                    if admin.user.id not in self.allowed_users_cache:
-                        self.allowed_users_cache.add(admin.user.id)
-                        total_members += 1
+                        # Пауза чтобы не превысить лимиты API
+                        if members_count % 50 == 0:
+                            await asyncio.sleep(0.1)
 
-                logger.info(f"👥 Группа {group_id}: {admin_count} администраторов")
-                print(f"✅ Группа {group_id}: добавлено {admin_count} администраторов")
+                    logger.info(f"👥 Группа {group_id}: {members_count} участников")
+                    print(f"✅ Группа {group_id}: добавлено {members_count} участников")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось загрузить всех участников группы {group_id}: {e}")
+                    print(f"⚠️ Группа {group_id}: загружаем только администраторов")
+
+                    # Fallback: загружаем только администраторов
+                    admins = await self.bot.get_chat_administrators(group_id)
+                    admin_count = len(admins)
+
+                    for admin in admins:
+                        if admin.user.id not in self.allowed_users_cache:
+                            self.allowed_users_cache.add(admin.user.id)
+                            total_members += 1
+
+                    logger.info(f"👥 Группа {group_id}: {admin_count} администраторов (fallback)")
+                    print(f"✅ Группа {group_id}: добавлено {admin_count} администраторов")
 
                 # Небольшая задержка между группами
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
 
             except Exception as e:
                 logger.error(f"❌ Ошибка загрузки группы {group_id}: {e}")
