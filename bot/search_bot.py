@@ -1,4 +1,4 @@
-# search_bot.py - ПОЛНАЯ ВЕРСИЯ С ГИБРИДНОЙ ПРОВЕРКОЙ ДОСТУПА
+# search_bot.py - ПОЛНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ
 import os
 import html
 import asyncio
@@ -50,6 +50,11 @@ class SearchBot:
         self.storage = MemoryStorage()
         self.dp = Dispatcher(storage=self.storage)
         self.router = Router()
+
+        # ДОБАВЛЯЕМ МИДЛВАРЬ ДЛЯ ПРОВЕРКИ ДОСТУПА
+        self.router.message.middleware(self.access_middleware)
+        self.router.callback_query.middleware(self.access_middleware)
+
         self.dp.include_router(self.router)
 
         # Создаем aiohttp сессию для асинхронных запросов
@@ -68,6 +73,29 @@ class SearchBot:
 
         # Регистрируем обработчики
         self.register_handlers()
+
+    async def access_middleware(self, handler, event: types.Update, data: dict):
+        """МИДЛВАРЬ: Проверяет доступ ПЕРЕД любым обработчиком"""
+        # Получаем user_id из сообщения или callback
+        user_id = None
+        if event.message:
+            user_id = event.message.from_user.id
+        elif event.callback_query:
+            user_id = event.callback_query.from_user.id
+
+        if user_id:
+            # Проверяем доступ
+            has_access = await self.check_access(user_id)
+            if not has_access:
+                # Если доступа нет, отправляем сообщение и прерываем обработку
+                if event.message:
+                    await self.send_access_denied(event.message)
+                elif event.callback_query:
+                    await event.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                return  # Прерываем выполнение обработчиков
+
+        # Если доступ есть, продолжаем выполнение
+        return await handler(event, data)
 
     async def check_access(self, user_id: int) -> bool:
         """Гибридная проверка доступа: БД + Telegram API"""
@@ -175,7 +203,7 @@ class SearchBot:
             logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
 
     def register_handlers(self):
-        """Регистрирует все обработчики"""
+        """Регистрирует все обработчики - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА В КАЖДОМ"""
         # Обработчики команд
         self.router.message.register(self.start_handler, Command("start"))
         self.router.message.register(self.search_handler, Command("search"))
@@ -198,14 +226,8 @@ class SearchBot:
         self.router.callback_query.register(self.more_callback_handler, F.data.startswith('more_'))
 
     async def start_handler(self, message: types.Message):
-        """Обработчик команды /start"""
+        """Обработчик команды /start - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
-
-        # Проверяем доступ
-        has_access = await self.check_access(message.from_user.id)
-        if not has_access:
-            await self.send_access_denied(message)
-            return
 
         welcome_text = """
 🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
@@ -233,14 +255,8 @@ class SearchBot:
             await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
 
     async def search_handler(self, message: types.Message, state: FSMContext):
-        """Обработчик команды /search"""
+        """Обработчик команды /search - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
-
-        # Проверяем доступ
-        has_access = await self.check_access(message.from_user.id)
-        if not has_access:
-            await self.send_access_denied(message)
-            return
 
         query = message.text.replace('/search', '').strip()
 
@@ -270,14 +286,8 @@ class SearchBot:
         await self.perform_search(message, query, state)
 
     async def help_handler(self, message: types.Message):
-        """Обработчик команды /help"""
+        """Обработчик команды /help - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
-
-        # Проверяем доступ
-        has_access = await self.check_access(message.from_user.id)
-        if not has_access:
-            await self.send_access_denied(message)
-            return
 
         help_text = """
 <b>📖 Помощь по использованию бота</b>
@@ -310,14 +320,8 @@ class SearchBot:
             logger.error(f"Ошибка при отправке справки: {e}")
 
     async def reply_buttons_handler(self, message: types.Message):
-        """Обработчик Reply-кнопок"""
+        """Обработчик Reply-кнопок - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         logger.info(f"🔹 Кнопка '{message.text}' от {message.from_user.id}")
-
-        # Проверяем доступ
-        has_access = await self.check_access(message.from_user.id)
-        if not has_access:
-            await self.send_access_denied(message)
-            return
 
         text = message.text
 
@@ -373,14 +377,8 @@ class SearchBot:
             logger.error(f"Ошибка при обработке кнопки: {e}")
 
     async def text_handler(self, message: types.Message, state: FSMContext):
-        """Обработчик обычных сообщений для поиска"""
+        """Обработчик обычных сообщений для поиска - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         logger.info(f"🔹 Сообщение от {message.from_user.id}: '{message.text}'")
-
-        # Проверяем доступ
-        has_access = await self.check_access(message.from_user.id)
-        if not has_access:
-            await self.send_access_denied(message)
-            return
 
         query = message.text.strip()
 
@@ -702,14 +700,8 @@ class SearchBot:
                 pass
 
     async def file_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработчик нажатий на кнопки файлов"""
+        """Обработчик нажатий на кнопки файлов - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         try:
-            # Проверяем доступ
-            has_access = await self.check_access(callback_query.from_user.id)
-            if not has_access:
-                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-                return
-
             file_index = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -747,14 +739,8 @@ class SearchBot:
             await callback_query.answer("❌ Ошибка при обработке запроса")
 
     async def more_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработчик кнопки навигации"""
+        """Обработчик кнопки навигации - ТЕПЕРЬ БЕЗ ПРОВЕРКИ ДОСТУПА"""
         try:
-            # Проверяем доступ
-            has_access = await self.check_access(callback_query.from_user.id)
-            if not has_access:
-                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
-                return
-
             page = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -796,9 +782,9 @@ class SearchBot:
     async def run(self):
         """Запускает бота"""
         logger.info("🤖 Запуск бота...")
-        print("🚀 ЗАПУСК БОТА С ГИБРИДНОЙ ПРОВЕРКОЙ ДОСТУПА...")
-        print("✅ Бот будет проверять доступ через БД + Telegram API")
-        print("📊 Существующие пользователи из БД + новые проверки в реальном времени")
+        print("🚀 ЗАПУСК БОТА С МИДЛВАРЬЮ ПРОВЕРКИ ДОСТУПА...")
+        print("✅ Доступ проверяется ПЕРВЫМ для всех сообщений")
+        print("📊 Мидлварь гарантирует единообразную проверку")
 
         await self.setup_commands()
 
@@ -807,9 +793,9 @@ class SearchBot:
             logger.info(f"✅ Бот @{me.username} запущен")
             print(f"✅ Бот @{me.username} успешно запущен!")
             print(f"🔐 Система проверки доступа:")
-            print(f"   • Сначала проверка в БД (быстро)")
-            print(f"   • Затем проверка через Telegram API (при необходимости)")
-            print(f"   • Автоматическое сохранение новых пользователей в БД")
+            print(f"   • Мидлварь проверяет доступ ПЕРЕД любым обработчиком")
+            print(f"   • Единообразная проверка для всех типов сообщений")
+            print(f"   • Гарантированный ответ на первое сообщение")
 
             await self.dp.start_polling(
                 self.bot,
