@@ -38,6 +38,10 @@ class SearchBot:
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.api_url = os.getenv('SITE_API_URL', 'http://localhost:8000/api/search/')
 
+        # Получаем ID разрешенных групп из .env
+        allowed_groups = os.getenv('ALLOWED_GROUP_IDS', '')
+        self.allowed_group_ids = [int(group_id.strip()) for group_id in allowed_groups.split(',') if group_id.strip()]
+
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
@@ -56,7 +60,7 @@ class SearchBot:
         self.cache_timeout = 300  # 5 минут
 
         # Ограничитель скорости отправки сообщений
-        self.rate_limit_delay = 0.1  # 0.1 секунд между сообщениями
+        self.rate_limit_delay = 0.05  # Уменьшил задержку
 
         # Регистрируем обработчики
         self.register_handlers()
@@ -64,29 +68,32 @@ class SearchBot:
     def register_handlers(self):
         """Регистрирует все обработчики"""
         # Обработчики команд
-        self.router.message.register(self.start, Command("start"))
-        self.router.message.register(self.search_command, Command("search"))
-        self.router.message.register(self.help_command, Command("help"))
+        self.router.message.register(self.start_handler, Command("start"))
+        self.router.message.register(self.search_handler, Command("search"))
+        self.router.message.register(self.help_handler, Command("help"))
 
         # Обработчик Reply-кнопок
         self.router.message.register(
-            self.handle_reply_buttons,
+            self.reply_buttons_handler,
             F.text.in_(["🔍 Начать поиск", "🏠 Главное меню", "❓ Помощь", "ℹ️ О боте"])
         )
 
         # Обработчик обычных сообщений для поиска
         self.router.message.register(
-            self.handle_search_query,
+            self.text_handler,
             F.text & ~F.text.startswith('/')
         )
 
         # Callback обработчики
-        self.router.callback_query.register(self.button_callback, F.data.startswith('file_'))
-        self.router.callback_query.register(self.more_callback, F.data.startswith('more_'))
+        self.router.callback_query.register(self.file_callback_handler, F.data.startswith('file_'))
+        self.router.callback_query.register(self.more_callback_handler, F.data.startswith('more_'))
 
-    async def start(self, message: types.Message):
+    async def start_handler(self, message: types.Message):
         """Обработчик команды /start"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
+
+        # Сразу отвечаем
+        await message.answer("🔄 Запускаю бота...")
 
         welcome_text = """
 🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
@@ -107,12 +114,13 @@ class SearchBot:
             await message.answer(
                 welcome_text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=self.get_main_menu_keyboard()
+                reply_markup=self.get_main_keyboard()
             )
         except Exception as e:
             logger.error(f"Ошибка при отправке стартового сообщения: {e}")
+            await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
 
-    async def search_command(self, message: types.Message, state: FSMContext):
+    async def search_handler(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
 
@@ -143,7 +151,7 @@ class SearchBot:
 
         await self.perform_search(message, query, state)
 
-    async def help_command(self, message: types.Message):
+    async def help_handler(self, message: types.Message):
         """Обработчик команды /help"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
 
@@ -177,9 +185,9 @@ class SearchBot:
         except Exception as e:
             logger.error(f"Ошибка при отправке справки: {e}")
 
-    async def handle_reply_buttons(self, message: types.Message):
+    async def reply_buttons_handler(self, message: types.Message):
         """Обработчик Reply-кнопок"""
-        logger.info(f"🔹 Reply-кнопка '{message.text}' от пользователя {message.from_user.id}")
+        logger.info(f"🔹 Кнопка '{message.text}' от {message.from_user.id}")
 
         text = message.text
 
@@ -205,20 +213,10 @@ class SearchBot:
                 )
 
             elif text == "🏠 Главное меню":
-                welcome_text = """
-🏠 <b>Главное меню</b>
-
-Выберите действие:
-                """
-
-                await message.answer(
-                    welcome_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_main_menu_keyboard()
-                )
+                await self.start_handler(message)
 
             elif text == "❓ Помощь":
-                await self.help_command(message)
+                await self.help_handler(message)
 
             elif text == "ℹ️ О боте":
                 about_text = """
@@ -239,16 +237,19 @@ class SearchBot:
                 await message.answer(
                     about_text,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=self.get_main_menu_keyboard()
+                    reply_markup=self.get_main_keyboard()
                 )
         except Exception as e:
-            logger.error(f"Ошибка при обработке reply-кнопки: {e}")
+            logger.error(f"Ошибка при обработке кнопки: {e}")
 
-    async def handle_search_query(self, message: types.Message, state: FSMContext):
+    async def text_handler(self, message: types.Message, state: FSMContext):
         """Обработчик обычных сообщений для поиска"""
-        logger.info(f"🔹 Поисковый запрос от пользователя {message.from_user.id}: '{message.text}'")
+        logger.info(f"🔹 Сообщение от {message.from_user.id}: '{message.text}'")
 
         query = message.text.strip()
+
+        if not query:
+            return
 
         try:
             await self.bot.send_chat_action(message.chat.id, "typing")
@@ -257,44 +258,43 @@ class SearchBot:
 
         await self.perform_search(message, query, state)
 
-    def get_main_menu_keyboard(self):
-        """Создает Reply-клавиатуру для главного меню"""
+    def get_main_keyboard(self):
+        """Создает главную клавиатуру"""
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔍 Начать поиск")],
                 [KeyboardButton(text="❓ Помощь"), KeyboardButton(text="ℹ️ О боте")]
             ],
             resize_keyboard=True,
-            input_field_placeholder="Выберите действие или введите запрос..."
+            input_field_placeholder="Выберите действие..."
         )
         return keyboard
 
     def get_search_keyboard(self):
-        """Создает Reply-клавиатуру для поиска"""
+        """Создает клавиатуру для поиска"""
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🏠 Главное меню")],
                 [KeyboardButton(text="❓ Помощь")]
             ],
             resize_keyboard=True,
-            input_field_placeholder="Введите поисковый запрос..."
+            input_field_placeholder="Введите запрос..."
         )
         return keyboard
 
     def get_help_keyboard(self):
-        """Создает Reply-клавиатуру для помощи"""
+        """Создает клавиатуру для помощи"""
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔍 Начать поиск")],
                 [KeyboardButton(text="🏠 Главное меню")]
             ],
-            resize_keyboard=True,
-            input_field_placeholder="Выберите действие..."
+            resize_keyboard=True
         )
         return keyboard
 
-    async def setup_bot_commands(self):
-        """Устанавливает команды бота в меню"""
+    async def setup_commands(self):
+        """Устанавливает команды бота"""
         commands = [
             types.BotCommand(command="/start", description="Запустить бота"),
             types.BotCommand(command="/search", description="Поиск файлов"),
@@ -302,212 +302,41 @@ class SearchBot:
         ]
         await self.bot.set_my_commands(commands)
 
-    async def send_single_message(self, chat_id, text, **kwargs):
-        """Отправляет одно сообщение с обработкой ошибок и задержкой"""
+    async def send_message_safe(self, chat_id, text, **kwargs):
+        """Безопасная отправка сообщения"""
         try:
             await asyncio.sleep(self.rate_limit_delay)
             return await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
         except TelegramRetryAfter as e:
-            logger.warning(f"⚠️ Rate limit, waiting {e.retry_after}s")
+            logger.warning(f"⚠️ Rate limit, ждем {e.retry_after}s")
             await asyncio.sleep(e.retry_after)
-            return await self.send_single_message(chat_id, text, **kwargs)
+            return await self.send_message_safe(chat_id, text, **kwargs)
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+            logger.error(f"❌ Ошибка отправки: {e}")
             return None
 
-    async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
-        """Отправляет одну страницу результатов"""
-        try:
-            page_size = 10
-            start_idx = page * page_size
-            end_idx = start_idx + page_size
-            page_results = all_results[start_idx:end_idx]
-
-            total_files = len(all_results)
-            total_pages = (total_files + page_size - 1) // page_size
-
-            await state.update_data(
-                last_results=all_results,
-                current_page=page,
-                current_query=query
-            )
-
-            if previous_messages:
-                await asyncio.sleep(0.3)
-                await self.delete_messages_batch(chat_id, previous_messages)
-
-            current_messages = []
-
-            if page == 0:
-                header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
-            else:
-                header_text = f"📄 <b>Страница {page + 1}</b> | Найдено <b>{total_files}</b> файлов\n"
-
-            header_msg = await self.send_single_message(
-                chat_id=chat_id,
-                text=header_text,
-                parse_mode=ParseMode.HTML
-            )
-            if header_msg:
-                current_messages.append(header_msg.message_id)
-
-            for i, result in enumerate(page_results, start=start_idx + 1):
-                name = html.escape(result['name'])
-                path = html.escape(result['path'])
-
-                file_text = f"""
-📄 <b>{name}</b>
-
-📁 <i>Путь:</i> {path}
-                """
-
-                builder = InlineKeyboardBuilder()
-                builder.row(InlineKeyboardButton(
-                    text="📋 Получить ссылки на файл",
-                    callback_data=f"file_{i - 1}"
-                ))
-
-                file_msg = await self.send_single_message(
-                    chat_id=chat_id,
-                    text=file_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=builder.as_markup(),
-                    disable_web_page_preview=True
-                )
-
-                if file_msg:
-                    current_messages.append(file_msg.message_id)
-                else:
-                    logger.warning(f"⚠️ Не удалось отправить файл {i}")
-
-            nav_text = f"⚡ <b>Страница {page + 1} из {total_pages}</b> | <i>Файлы {start_idx + 1}-{min(end_idx, total_files)} из {total_files}</i>"
-
-            nav_builder = InlineKeyboardBuilder()
-
-            if end_idx < total_files:
-                nav_builder.row(InlineKeyboardButton(
-                    text="➡️ Показать еще",
-                    callback_data=f"more_{page + 1}"
-                ))
-
-            if page > 0:
-                nav_builder.row(InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data=f"more_{page - 1}"
-                ))
-
-            nav_msg = await self.send_single_message(
-                chat_id=chat_id,
-                text=nav_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=nav_builder.as_markup() if nav_builder.buttons else None
-            )
-            if nav_msg:
-                current_messages.append(nav_msg.message_id)
-
-            await state.update_data(current_messages=current_messages)
-            return current_messages
-
-        except Exception as e:
-            logger.error(f"Ошибка при отправке страницы результатов: {e}")
-            return []
-
-    async def delete_messages_batch(self, chat_id, message_ids):
-        """Быстрое удаление сообщений пачками"""
-        if not message_ids:
-            return
-
-        delete_tasks = []
-        for msg_id in message_ids:
-            try:
-                await asyncio.sleep(0.2)
-                task = asyncio.create_task(
-                    self.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                )
-                delete_tasks.append(task)
-            except Exception as e:
-                continue
-
-        if delete_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*delete_tasks, return_exceptions=True),
-                    timeout=15.0
-                )
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-    async def execute_search_with_timeout(self, query: str, timeout: int = 55):
-        """Выполнение поиска с ограничением по времени"""
-        try:
-            cache_key = query.lower().strip()
-            if cache_key in self.search_cache:
-                cache_data = self.search_cache[cache_key]
-                if time.time() - cache_data['timestamp'] < self.cache_timeout:
-                    logger.info(f"📦 Используем кэш для запроса: {query}")
-                    return cache_data['results']
-
-            return await asyncio.wait_for(self.search_files_api(query), timeout=timeout)
-
-        except asyncio.TimeoutError:
-            if cache_key in self.search_cache:
-                del self.search_cache[cache_key]
-            raise
-
-    async def search_files_api(self, query: str):
-        """Поиск файлов через API"""
-        cache_key = query.lower().strip()
-        if cache_key in self.search_cache:
-            cache_data = self.search_cache[cache_key]
-            if time.time() - cache_data['timestamp'] < self.cache_timeout:
-                return cache_data['results']
-
-        session = await self.get_session()
-        search_url = f"{self.api_url}?q={query}"
-        logger.info(f"🌐 Отправляем запрос к API: {search_url}")
-
-        try:
-            async with session.get(search_url) as response:
-                logger.info(f"🌐 Получен ответ: {response.status}")
-
-                if response.status != 200:
-                    return {'results_count': 0, 'results': []}
-
-                data = await response.json()
-                logger.info(f"📊 Получено результатов: {data.get('results_count', 0)}")
-
-                self.search_cache[cache_key] = {
-                    'results': data,
-                    'timestamp': time.time()
-                }
-
-                return data
-
-        except asyncio.TimeoutError:
-            logger.error(f"⏰ Таймаут HTTP запроса для: {query}")
-            return {'results_count': 0, 'results': []}
-        except Exception as e:
-            logger.error(f"❌ Ошибка при поиске файлов: {e}")
-            return {'results_count': 0, 'results': []}
-
     async def perform_search(self, message: types.Message, query: str, state: FSMContext):
-        """Выполняет поиск через API"""
+        """Выполняет поиск"""
         start_time = time.time()
         progress_msg = None
 
         try:
-            logger.info(f"🔍 Начинаем поиск: '{query}'")
+            logger.info(f"🔍 Поиск: '{query}'")
 
-            progress_msg = await self.send_single_message(
+            progress_msg = await self.send_message_safe(
                 chat_id=message.chat.id,
                 text=f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                 parse_mode=ParseMode.HTML
             )
 
-            data = await self.execute_search_with_timeout(query, timeout=55)
+            # Имитируем поиск для теста
+            await asyncio.sleep(1)
+
+            # Здесь будет реальный поиск через API
+            data = await self.search_files_api(query)
 
             execution_time = time.time() - start_time
-            logger.info(f"✅ Поиск '{query}' выполнен за {execution_time:.2f}с, найдено: {data.get('results_count', 0)}")
+            logger.info(f"✅ Поиск выполнен за {execution_time:.2f}с, найдено: {data.get('results_count', 0)}")
 
             if data.get('results_count', 0) == 0:
                 if progress_msg:
@@ -521,39 +350,119 @@ class SearchBot:
             if progress_msg:
                 await progress_msg.delete()
 
-            await self.send_results_page(
+            await self.send_results(
                 chat_id=message.chat.id,
-                all_results=data['results'],
+                results=data['results'],
                 query=query,
-                state=state,
-                page=0
+                state=state
             )
 
-        except asyncio.TimeoutError:
-            logger.error(f"⏰ Таймаут при поиске: '{query}'")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при поиске: {e}")
             if progress_msg:
                 await progress_msg.edit_text(
-                    f"⏰ <b>Поиск занял слишком много времени</b>\n\n"
-                    f"Попробуйте упростить запрос",
+                    "❌ <b>Произошла ошибка при поиске</b>\n\nПопробуйте позже",
                     parse_mode=ParseMode.HTML
                 )
 
-        except TelegramRetryAfter as e:
-            logger.warning(f"⚠️ Telegram RetryAfter: {e.retry_after}")
-            await asyncio.sleep(e.retry_after)
-            await self.perform_search(message, query, state)
+    async def search_files_api(self, query: str):
+        """Поиск файлов через API"""
+        # Временная заглушка для теста
+        return {
+            'results_count': 2,
+            'results': [
+                {
+                    'name': 'Тестовый файл 1.pdf',
+                    'path': '/документы/тест',
+                    'public_link': 'https://yandex.ru',
+                    'download_link': 'https://yandex.ru/download'
+                },
+                {
+                    'name': 'Тестовый файл 2.docx',
+                    'path': '/документы/тест',
+                    'public_link': 'https://yandex.ru',
+                    'download_link': 'https://yandex.ru/download'
+                }
+            ]
+        }
+
+    async def send_results(self, chat_id, results, query, state, page=0):
+        """Отправляет результаты поиска"""
+        try:
+            page_size = 5
+            start_idx = page * page_size
+            end_idx = start_idx + page_size
+            page_results = results[start_idx:end_idx]
+
+            total_files = len(results)
+            total_pages = (total_files + page_size - 1) // page_size
+
+            await state.update_data(
+                last_results=results,
+                current_page=page,
+                current_query=query
+            )
+
+            # Заголовок
+            header_text = f"✅ Найдено <b>{total_files}</b> файлов по запросу '<b>{html.escape(query)}</b>':\n\n"
+            await self.send_message_safe(chat_id, header_text, parse_mode=ParseMode.HTML)
+
+            # Файлы
+            for i, result in enumerate(page_results, start=start_idx + 1):
+                name = html.escape(result['name'])
+                path = html.escape(result['path'])
+
+                file_text = f"📄 <b>{name}</b>\n📁 <i>Путь:</i> {path}"
+
+                builder = InlineKeyboardBuilder()
+                builder.row(InlineKeyboardButton(
+                    text="📋 Получить ссылки",
+                    callback_data=f"file_{i - 1}"
+                ))
+
+                await self.send_message_safe(
+                    chat_id=chat_id,
+                    text=file_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=builder.as_markup(),
+                    disable_web_page_preview=True
+                )
+
+            # Навигация
+            if total_pages > 1:
+                nav_text = f"📄 Страница {page + 1} из {total_pages}"
+                nav_builder = InlineKeyboardBuilder()
+
+                if page > 0:
+                    nav_builder.row(InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=f"more_{page - 1}"
+                    ))
+
+                if end_idx < total_files:
+                    if page > 0:
+                        nav_builder.add(InlineKeyboardButton(
+                            text="➡️ Вперед",
+                            callback_data=f"more_{page + 1}"
+                        ))
+                    else:
+                        nav_builder.row(InlineKeyboardButton(
+                            text="➡️ Вперед",
+                            callback_data=f"more_{page + 1}"
+                        ))
+
+                await self.send_message_safe(
+                    chat_id=chat_id,
+                    text=nav_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=nav_builder.as_markup()
+                )
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при поиске '{query}': {e}")
-            if progress_msg:
-                await progress_msg.edit_text(
-                    f"❌ <b>Произошла ошибка при поиске</b>\n\n"
-                    f"Попробуйте позже",
-                    parse_mode=ParseMode.HTML
-                )
+            logger.error(f"Ошибка при отправке результатов: {e}")
 
-    async def button_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработчик нажатий на кнопки файлов"""
+    async def file_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
+        """Обработчик кнопок файлов"""
         try:
             file_index = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
@@ -586,69 +495,56 @@ class SearchBot:
                 )
 
             await callback_query.answer()
-
         except Exception as e:
-            logger.error(f"Callback error: {e}")
-            await callback_query.answer("❌ Ошибка при обработке запроса")
+            logger.error(f"Ошибка callback: {e}")
+            await callback_query.answer("❌ Ошибка")
 
-    async def more_callback(self, callback_query: types.CallbackQuery, state: FSMContext):
-        """Обработчик кнопки навигации"""
+    async def more_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
+        """Обработчик пагинации"""
         try:
             page = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
             query = user_data.get('current_query', '')
-            previous_messages = user_data.get('current_messages', [])
-
-            if not results:
-                await callback_query.answer("❌ Результаты устарели")
-                return
 
             await callback_query.answer("⏳ Загружаем...")
+            await callback_query.message.delete()
 
-            await self.send_results_page(
+            await self.send_results(
                 chat_id=callback_query.message.chat.id,
-                all_results=results,
+                results=results,
                 query=query,
                 state=state,
-                page=page,
-                previous_messages=previous_messages
+                page=page
             )
 
         except Exception as e:
-            logger.error(f"More callback error: {e}")
+            logger.error(f"Ошибка пагинации: {e}")
             await callback_query.answer("❌ Ошибка")
 
     async def get_session(self):
         """Создает aiohttp сессию"""
         if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession()
         return self.session
 
     async def close_session(self):
-        """Закрывает aiohttp сессию"""
+        """Закрывает сессию"""
         if self.session:
             await self.session.close()
-            self.session = None
 
     async def run(self):
-        """Запускает бота"""
-        logger.info("🤖 Бот запускается...")
-
-        await self.setup_bot_commands()
-        await self.close_session()
+        await self.setup_commands()
 
         try:
             me = await self.bot.get_me()
-            logger.info(f"✅ Бот @{me.username} успешно подключен")
+            logger.info(f"✅ Бот @{me.username} запущен")
 
-            await self.dp.start_polling(
-                self.bot,
-                allowed_updates=["message", "callback_query"],
-                skip_updates=True
-            )
+            await self.dp.start_polling(self.bot, skip_updates=True)
         except Exception as e:
-            logger.error(f"❌ Ошибка запуска бота: {e}")
+            logger.error(f"❌ Ошибка: {e}")
         finally:
             await self.close_session()
+
+
+# Запуск бота
