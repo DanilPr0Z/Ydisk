@@ -59,8 +59,12 @@ class SearchBot:
         self.search_cache = {}
         self.cache_timeout = 300  # 5 минут
 
+        # Кэш проверок доступа
+        self.access_cache = {}
+        self.access_cache_timeout = 600  # 10 минут
+
         # Ограничитель скорости отправки сообщений
-        self.rate_limit_delay = 0.05  # Уменьшил задержку
+        self.rate_limit_delay = 0.05
 
         # Регистрируем обработчики
         self.register_handlers()
@@ -88,12 +92,68 @@ class SearchBot:
         self.router.callback_query.register(self.file_callback_handler, F.data.startswith('file_'))
         self.router.callback_query.register(self.more_callback_handler, F.data.startswith('more_'))
 
+    async def check_access(self, user_id: int) -> bool:
+        """Быстрая проверка доступа пользователя с кэшированием"""
+        # Если группы не указаны, доступ разрешен всем
+        if not self.allowed_group_ids:
+            return True
+
+        # Проверяем кэш
+        cache_key = f"access_{user_id}"
+        current_time = time.time()
+
+        if cache_key in self.access_cache:
+            cache_data = self.access_cache[cache_key]
+            if current_time - cache_data['timestamp'] < self.access_cache_timeout:
+                return cache_data['has_access']
+
+        # Проверяем доступ
+        has_access = False
+        for group_id in self.allowed_group_ids:
+            try:
+                # Быстрая проверка без детальной информации
+                member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
+                if member.status in ['member', 'administrator', 'creator']:
+                    has_access = True
+                    break
+            except Exception as e:
+                logger.debug(f"Ошибка проверки доступа для {user_id} в группе {group_id}: {e}")
+                continue
+
+        # Сохраняем в кэш
+        self.access_cache[cache_key] = {
+            'has_access': has_access,
+            'timestamp': current_time
+        }
+
+        return has_access
+
+    async def check_access_decorator(self, handler, event, data):
+        """Декоратор для проверки доступа"""
+        if isinstance(event, (types.Message, types.CallbackQuery)):
+            user_id = event.from_user.id
+
+            # Проверяем доступ
+            has_access = await self.check_access(user_id)
+
+            if not has_access:
+                if isinstance(event, types.Message):
+                    await self.send_access_denied(event)
+                elif isinstance(event, types.CallbackQuery):
+                    await event.answer("❌ Доступ запрещен", show_alert=True)
+                return
+
+        return await handler(event, data)
+
     async def start_handler(self, message: types.Message):
         """Обработчик команды /start"""
         logger.info(f"🔹 /start от пользователя {message.from_user.id}")
 
-        # Сразу отвечаем
-        await message.answer("🔄 Запускаю бота...")
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         welcome_text = """
 🔍 <b>Бот для поиска файлов в Cascate Cloud</b>
@@ -123,6 +183,12 @@ class SearchBot:
     async def search_handler(self, message: types.Message, state: FSMContext):
         """Обработчик команды /search"""
         logger.info(f"🔹 /search от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         query = message.text.replace('/search', '').strip()
 
@@ -154,6 +220,12 @@ class SearchBot:
     async def help_handler(self, message: types.Message):
         """Обработчик команды /help"""
         logger.info(f"🔹 /help от пользователя {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         help_text = """
 <b>📖 Помощь по использованию бота</b>
@@ -188,6 +260,12 @@ class SearchBot:
     async def reply_buttons_handler(self, message: types.Message):
         """Обработчик Reply-кнопок"""
         logger.info(f"🔹 Кнопка '{message.text}' от {message.from_user.id}")
+
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
 
         text = message.text
 
@@ -246,6 +324,12 @@ class SearchBot:
         """Обработчик обычных сообщений для поиска"""
         logger.info(f"🔹 Сообщение от {message.from_user.id}: '{message.text}'")
 
+        # Проверяем доступ
+        has_access = await self.check_access(message.from_user.id)
+        if not has_access:
+            await self.send_access_denied(message)
+            return
+
         query = message.text.strip()
 
         if not query:
@@ -257,6 +341,19 @@ class SearchBot:
             logger.error(f"Ошибка отправки действия: {e}")
 
         await self.perform_search(message, query, state)
+
+    async def send_access_denied(self, message: types.Message):
+        """Отправляет сообщение о запрете доступа"""
+        try:
+            await message.answer(
+                "❌ <b>Доступ запрещен</b>\n\n"
+                "Этот бот доступен только для участников разрешенных групп.\n"
+                "Пожалуйста, вступите в одну из групп чтобы использовать бота.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения о доступе: {e}")
 
     def get_main_keyboard(self):
         """Создает главную клавиатуру"""
@@ -328,9 +425,6 @@ class SearchBot:
                 text=f"🔍 Ищу: <b>{html.escape(query)}</b>...",
                 parse_mode=ParseMode.HTML
             )
-
-            # Имитируем поиск для теста
-            await asyncio.sleep(1)
 
             # Здесь будет реальный поиск через API
             data = await self.search_files_api(query)
@@ -464,6 +558,12 @@ class SearchBot:
     async def file_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик кнопок файлов"""
         try:
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                return
+
             file_index = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -502,6 +602,12 @@ class SearchBot:
     async def more_callback_handler(self, callback_query: types.CallbackQuery, state: FSMContext):
         """Обработчик пагинации"""
         try:
+            # Проверяем доступ
+            has_access = await self.check_access(callback_query.from_user.id)
+            if not has_access:
+                await callback_query.answer("❌ Доступ запрещен", show_alert=True)
+                return
+
             page = int(callback_query.data.split('_')[1])
             user_data = await state.get_data()
             results = user_data.get('last_results', [])
@@ -534,6 +640,9 @@ class SearchBot:
             await self.session.close()
 
     async def run(self):
+        """Запускает бота"""
+        logger.info("🤖 Запуск бота...")
+
         await self.setup_commands()
 
         try:
@@ -546,5 +655,3 @@ class SearchBot:
         finally:
             await self.close_session()
 
-
-# Запуск бота
