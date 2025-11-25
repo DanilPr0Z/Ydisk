@@ -1,4 +1,4 @@
-import requests
+# search_bot.py - ПОЛНАЯ ВЕРСИЯ С ГИБРИДНОЙ ПРОВЕРКОЙ ДОСТУПА
 import os
 import html
 import asyncio
@@ -14,12 +14,12 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardRemove
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from aiogram.enums import ParseMode, ChatType
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums import ParseMode
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+from aiogram.exceptions import TelegramRetryAfter
 from dotenv import load_dotenv
 
 # Настройка логирования
@@ -55,13 +55,13 @@ class SearchBot:
         # Создаем aiohttp сессию для асинхронных запросов
         self.session = None
 
-        # Кэш для частых запросов
+        # Кэш для поисковых запросов
         self.search_cache = {}
-        self.cache_timeout = 300  # 5 минут
+        self.cache_timeout = 300
 
-        # Кэш пользователей с доступом
-        self.allowed_users_cache = set()
-        self.cache_loaded = False
+        # Кэш для быстрой проверки доступа
+        self.access_cache = {}
+        self.access_cache_timeout = 3600  # 1 час
 
         # Ограничитель скорости отправки сообщений
         self.rate_limit_delay = 0.1
@@ -69,110 +69,110 @@ class SearchBot:
         # Регистрируем обработчики
         self.register_handlers()
 
-    async def load_all_members_fast(self):
-        """Быстрая загрузка всех участников групп"""
-        if not self.allowed_group_ids:
-            logger.info("✅ Группы не указаны, доступ разрешен всем")
-            self.cache_loaded = True
-            return
-
-        logger.info(f"🚀 Начинаю загрузку участников из {len(self.allowed_group_ids)} групп...")
-        print("🔄 ЗАГРУЗКА КЭША: Начинаю сбор пользователей из групп...")
-
-        total_members = 0
-        start_time = time.time()
-
-        for group_id in self.allowed_group_ids:
-            try:
-                logger.info(f"📦 Загружаю пользователей из группы {group_id}...")
-                print(f"📦 Обрабатываю группу {group_id}...")
-
-                # Загружаем ВСЕХ участников группы
-                members_count = 0
-                try:
-                    async for member in self.bot.get_chat_members(group_id):
-                        if member.user.id not in self.allowed_users_cache:
-                            self.allowed_users_cache.add(member.user.id)
-                            total_members += 1
-                            members_count += 1
-
-                        # Пауза чтобы не превысить лимиты API
-                        if members_count % 50 == 0:
-                            await asyncio.sleep(0.1)
-
-                    logger.info(f"👥 Группа {group_id}: {members_count} участников")
-                    print(f"✅ Группа {group_id}: добавлено {members_count} участников")
-
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось загрузить всех участников группы {group_id}: {e}")
-                    print(f"⚠️ Группа {group_id}: загружаем только администраторов")
-
-                    # Fallback: загружаем только администраторов
-                    admins = await self.bot.get_chat_administrators(group_id)
-                    admin_count = len(admins)
-
-                    for admin in admins:
-                        if admin.user.id not in self.allowed_users_cache:
-                            self.allowed_users_cache.add(admin.user.id)
-                            total_members += 1
-
-                    logger.info(f"👥 Группа {group_id}: {admin_count} администраторов (fallback)")
-                    print(f"✅ Группа {group_id}: добавлено {admin_count} администраторов")
-
-                # Небольшая задержка между группами
-                await asyncio.sleep(1)
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка загрузки группы {group_id}: {e}")
-                print(f"❌ Ошибка загрузки группы {group_id}")
-                continue
-
-        loading_time = time.time() - start_time
-        logger.info(f"✅ Загрузка завершена за {loading_time:.2f}с. Всего пользователей в кэше: {total_members}")
-        print(f"🎉 КЭШ ЗАГРУЖЕН УСПЕШНО!")
-        print(f"⏱ Время загрузки: {loading_time:.2f} секунд")
-        print(f"👥 Пользователей в кэше: {total_members}")
-        print(f"📊 Групп обработано: {len(self.allowed_group_ids)}")
-        print("🤖 Бот готов к работе!")
-
-        self.cache_loaded = True
-
     async def check_access(self, user_id: int) -> bool:
-        """Проверяет доступ пользователя"""
+        """Гибридная проверка доступа: БД + Telegram API"""
         # Если группы не указаны, доступ разрешен всем
         if not self.allowed_group_ids:
             return True
 
-        # Если кэш еще не загружен, загружаем его
-        if not self.cache_loaded:
-            logger.info("🔄 Кэш не загружен, загружаем...")
-            await self.load_all_members_fast()
+        # Проверяем в кэше
+        cache_key = f"access_{user_id}"
+        if cache_key in self.access_cache:
+            cache_data = self.access_cache[cache_key]
+            if time.time() - cache_data['timestamp'] < self.access_cache_timeout:
+                return cache_data['has_access']
 
-        # Быстрая проверка в памяти
-        if user_id in self.allowed_users_cache:
-            return True
+        # Сначала проверяем в БД
+        try:
+            from explorer.models import AllowedUser
 
-        # Если пользователя нет в кэше, проверяем индивидуально и добавляем
-        logger.info(f"🔍 Пользователь {user_id} не в кэше, проверяем индивидуально...")
-        has_access = await self.check_single_user(user_id)
+            def check_user_in_db():
+                return AllowedUser.objects.filter(user_id=user_id, is_active=True).exists()
+
+            user_exists = await asyncio.get_event_loop().run_in_executor(None, check_user_in_db)
+
+            if user_exists:
+                # Сохраняем в кэш
+                self.access_cache[cache_key] = {
+                    'has_access': True,
+                    'timestamp': time.time()
+                }
+                logger.info(f"✅ Доступ разрешен через БД: {user_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки доступа в БД для {user_id}: {e}")
+
+        # Если нет в БД, проверяем через Telegram API
+        has_access = await self.check_via_telegram_api(user_id)
+
+        # Сохраняем в кэш
+        self.access_cache[cache_key] = {
+            'has_access': has_access,
+            'timestamp': time.time()
+        }
 
         if has_access:
-            self.allowed_users_cache.add(user_id)
-            logger.info(f"➕ Добавлен в кэш: {user_id}")
+            # Сохраняем в БД как обычного участника
+            await self.save_user_to_db(user_id, source='member')
+            logger.info(f"✅ Доступ разрешен через API и сохранен в БД: {user_id}")
+        else:
+            logger.info(f"❌ Доступ запрещен: {user_id}")
 
         return has_access
 
-    async def check_single_user(self, user_id: int) -> bool:
-        """Проверяет одного пользователя через API"""
+    async def check_via_telegram_api(self, user_id: int) -> bool:
+        """Проверяет доступ через Telegram API"""
         for group_id in self.allowed_group_ids:
             try:
-                member = await self.bot.get_chat_member(chat_id=group_id, user_id=user_id)
+                member = await self.bot.get_chat_member(group_id, user_id)
                 if member.status in ['member', 'administrator', 'creator']:
+                    logger.info(f"✅ Пользователь {user_id} найден в группе {group_id} (статус: {member.status})")
                     return True
             except Exception as e:
-                logger.warning(f"Ошибка проверки пользователя {user_id}: {e}")
+                logger.debug(f"Пользователь {user_id} не в группе {group_id}: {e}")
                 continue
         return False
+
+    async def save_user_to_db(self, user_id: int, source: str = 'member'):
+        """Сохраняет пользователя в БД"""
+        try:
+            from explorer.models import AllowedUser
+
+            # Получаем информацию о пользователе
+            try:
+                user = await self.bot.get_chat(user_id)
+                username = user.username
+                first_name = user.first_name
+                last_name = user.last_name
+            except Exception:
+                # Если не можем получить информацию, сохраняем только ID
+                username = None
+                first_name = None
+                last_name = None
+
+            def create_user():
+                user, created = AllowedUser.objects.update_or_create(
+                    user_id=user_id,
+                    defaults={
+                        'username': username,
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'is_active': True,
+                        'source': source
+                    }
+                )
+                return created
+
+            created = await asyncio.get_event_loop().run_in_executor(None, create_user)
+
+            if created:
+                logger.info(f"➕ Пользователь {user_id} добавлен в БД (источник: {source})")
+            else:
+                logger.info(f"✏️ Пользователь {user_id} обновлен в БД (источник: {source})")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
 
     def register_handlers(self):
         """Регистрирует все обработчики"""
@@ -582,7 +582,7 @@ class SearchBot:
     async def send_results_page(self, chat_id, all_results, query, state, page=0, previous_messages=None):
         """Отправляет одну страницу результатов"""
         try:
-            page_size = 10  # ВЕРНУЛ 10 ФАЙЛОВ НА СТРАНИЦЕ
+            page_size = 10
             start_idx = page * page_size
             end_idx = start_idx + page_size
             page_results = all_results[start_idx:end_idx]
@@ -796,18 +796,20 @@ class SearchBot:
     async def run(self):
         """Запускает бота"""
         logger.info("🤖 Запуск бота...")
-        print("🚀 ЗАПУСК БОТА...")
-        print("🔄 Начинаю загрузку кэша пользователей...")
-
-        # Предварительно загружаем кэш при старте
-        await self.load_all_members_fast()
+        print("🚀 ЗАПУСК БОТА С ГИБРИДНОЙ ПРОВЕРКОЙ ДОСТУПА...")
+        print("✅ Бот будет проверять доступ через БД + Telegram API")
+        print("📊 Существующие пользователи из БД + новые проверки в реальном времени")
 
         await self.setup_commands()
 
         try:
             me = await self.bot.get_me()
             logger.info(f"✅ Бот @{me.username} запущен")
-            print(f"✅ Бот @{me.username} успешно запущен и готов к работе!")
+            print(f"✅ Бот @{me.username} успешно запущен!")
+            print(f"🔐 Система проверки доступа:")
+            print(f"   • Сначала проверка в БД (быстро)")
+            print(f"   • Затем проверка через Telegram API (при необходимости)")
+            print(f"   • Автоматическое сохранение новых пользователей в БД")
 
             await self.dp.start_polling(
                 self.bot,
@@ -819,4 +821,3 @@ class SearchBot:
             print(f"❌ Ошибка запуска бота: {e}")
         finally:
             await self.close_session()
-
